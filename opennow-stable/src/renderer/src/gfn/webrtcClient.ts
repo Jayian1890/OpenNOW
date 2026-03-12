@@ -442,6 +442,7 @@ export class GfnWebRtcClient {
   private audioContext: AudioContext | null = null;
 
   private inputReady = false;
+  public inputPaused = false;
   private inputProtocolVersion = 2;
   private heartbeatTimer: number | null = null;
   private mouseFlushTimer: number | null = null;
@@ -1559,6 +1560,7 @@ export class GfnWebRtcClient {
   private gamepadSendCount = 0;
 
   private pollGamepads(): void {
+    if (this.inputPaused) return;
     const gamepads = navigator.getGamepads();
     if (!gamepads) {
       return;
@@ -2209,6 +2211,7 @@ export class GfnWebRtcClient {
     };
 
     const onPointerMove = (event: PointerEvent) => {
+      if (this.inputPaused) return;
       if (event.pointerType && event.pointerType !== "mouse") {
         return;
       }
@@ -2225,10 +2228,12 @@ export class GfnWebRtcClient {
     };
 
     const onMouseMove = (event: MouseEvent) => {
+      if (this.inputPaused) return;
       queueMouseMovement(event.movementX, event.movementY, event.timeStamp);
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
+      if (this.inputPaused) return;
       if (!this.inputReady) {
         return;
       }
@@ -2284,6 +2289,7 @@ export class GfnWebRtcClient {
     };
 
     const onKeyUp = (event: KeyboardEvent) => {
+      if (this.inputPaused) return;
       if (!this.inputReady) {
         return;
       }
@@ -2327,6 +2333,7 @@ export class GfnWebRtcClient {
     };
 
     const onMouseDown = (event: MouseEvent) => {
+      if (this.inputPaused) return;
       if (!this.inputReady) {
         return;
       }
@@ -2345,6 +2352,7 @@ export class GfnWebRtcClient {
     };
 
     const onMouseUp = (event: MouseEvent) => {
+      if (this.inputPaused) return;
       if (!this.inputReady) {
         return;
       }

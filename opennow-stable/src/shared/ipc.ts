@@ -40,6 +40,9 @@ export const IPC_CHANNELS = {
   RECORDING_LIST: "recording:list",
   RECORDING_DELETE: "recording:delete",
   RECORDING_SHOW_IN_FOLDER: "recording:showInFolder",
+  CACHE_REFRESH_MANUAL: "cache:refresh-manual",
+  CACHE_STATUS_UPDATE: "cache:status-update",
+  CACHE_DELETE_ALL: "cache:delete-all",
 } as const;
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS];

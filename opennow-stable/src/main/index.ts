@@ -14,6 +14,14 @@ import { randomUUID } from "node:crypto";
 
 import { IPC_CHANNELS } from "@shared/ipc";
 import { initLogCapture, exportLogs } from "@shared/logger";
+import { cacheManager } from "./services/cacheManager";
+import { refreshScheduler } from "./services/refreshScheduler";
+import { cacheEventBus } from "./services/cacheEventBus";
+import {
+  fetchMainGamesUncached,
+  fetchLibraryGamesUncached,
+  fetchPublicGamesUncached,
+} from "./gfn/games";
 import type {
   MainToRendererSignalingEvent,
   AuthLoginRequest,
@@ -547,6 +555,7 @@ function registerIpcHandlers(): void {
     const token = await resolveJwt(payload?.token);
     const streamingBaseUrl =
       payload?.providerStreamingBaseUrl ?? authService.getSelectedProvider().streamingServiceUrl;
+    refreshScheduler.updateAuthContext(token, streamingBaseUrl);
     return fetchMainGames(token, streamingBaseUrl);
   });
 
@@ -554,6 +563,7 @@ function registerIpcHandlers(): void {
     const token = await resolveJwt(payload?.token);
     const streamingBaseUrl =
       payload?.providerStreamingBaseUrl ?? authService.getSelectedProvider().streamingServiceUrl;
+    refreshScheduler.updateAuthContext(token, streamingBaseUrl);
     return fetchLibraryGames(token, streamingBaseUrl);
   });
 
@@ -852,6 +862,15 @@ function registerIpcHandlers(): void {
     shell.showItemInFolder(join(dir, id));
   });
 
+  ipcMain.handle(IPC_CHANNELS.CACHE_REFRESH_MANUAL, async (): Promise<void> => {
+    await refreshScheduler.manualRefresh();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.CACHE_DELETE_ALL, async (): Promise<void> => {
+    await cacheManager.deleteAll();
+    console.log("[IPC] Cache deletion completed successfully");
+  });
+
   // TCP-based ping function - more accurate than HTTP as it only measures connection time
   async function tcpPing(hostname: string, port: number, timeoutMs: number = 3000): Promise<number | null> {
     return new Promise((resolve) => {
@@ -936,6 +955,8 @@ app.whenReady().then(async () => {
   // Initialize log capture first to capture all console output
   initLogCapture("main");
 
+  await cacheManager.initialize();
+
   authService = new AuthService(join(app.getPath("userData"), "auth-state.json"));
   await authService.initialize();
 
@@ -990,6 +1011,33 @@ app.whenReady().then(async () => {
   });
 
   registerIpcHandlers();
+
+  refreshScheduler.initialize(
+    fetchMainGamesUncached,
+    fetchLibraryGamesUncached,
+    fetchPublicGamesUncached,
+  );
+
+  cacheEventBus.on("cache:refresh-start", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(IPC_CHANNELS.CACHE_STATUS_UPDATE, { event: "refresh-start" });
+    }
+  });
+
+  cacheEventBus.on("cache:refresh-success", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(IPC_CHANNELS.CACHE_STATUS_UPDATE, { event: "refresh-success" });
+    }
+  });
+
+  cacheEventBus.on("cache:refresh-error", (details: { key: string; error: string }) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(IPC_CHANNELS.CACHE_STATUS_UPDATE, { event: "refresh-error", ...details });
+    }
+  });
+
+  refreshScheduler.start();
+
   await createMainWindow();
 
   app.on("activate", async () => {
@@ -1006,6 +1054,7 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  refreshScheduler.stop();
   signalingClient?.disconnect();
   signalingClient = null;
   signalingClientKey = null;

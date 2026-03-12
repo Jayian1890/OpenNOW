@@ -61,6 +61,7 @@ interface StreamViewProps {
   onRecordingShortcutChange: (value: string) => void;
   remainingPlaytimeText: string;
   micTrack?: MediaStreamTrack | null;
+  className?: string;
 }
 
 function getRttColor(rttMs: number): string {
@@ -274,6 +275,7 @@ export function StreamView({
   remainingPlaytimeText,
   micTrack,
   hideStreamButtons = false,
+  className,
 }: StreamViewProps): JSX.Element {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showHints, setShowHints] = useState(true);
@@ -947,7 +949,7 @@ export function StreamView({
   }, [captureScreenshot, handleToggleSideBar, isMacClient, shortcuts.screenshot, shortcuts.recording, toggleRecording]);
 
   return (
-    <div className="sv">
+    <div className={["sv", className].filter(Boolean).join(" ")}>
       <video
         ref={setVideoRef}
         autoPlay

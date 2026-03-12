@@ -33,9 +33,11 @@ export function colorQualityIs10Bit(cq: ColorQuality): boolean {
 }
 
 export type MicrophoneMode = "disabled" | "push-to-talk" | "voice-activity";
+export type AspectRatio = "16:9" | "16:10" | "21:9" | "32:9";
 
 export interface Settings {
   resolution: string;
+  aspectRatio: AspectRatio;
   fps: number;
   maxBitrateMbps: number;
   codec: VideoCodec;
@@ -54,6 +56,10 @@ export interface Settings {
   microphoneMode: MicrophoneMode;
   microphoneDeviceId: string;
   hideStreamButtons: boolean;
+  controllerMode: boolean;
+  controllerUiSounds: boolean;
+  autoLoadControllerLibrary: boolean;
+  favoriteGameIds: string[];
   sessionClockShowEveryMinutes: number;
   sessionClockShowDurationSeconds: number;
   windowWidth: number;
@@ -199,7 +205,11 @@ export interface GameInfo {
   launchAppId?: string;
   title: string;
   description?: string;
+  longDescription?: string;
+  featureLabels?: string[];
+  genres?: string[];
   imageUrl?: string;
+  screenshotUrl?: string;
   playType?: string;
   membershipTierLabel?: string;
   selectedVariantIndex: number;
@@ -398,6 +408,8 @@ export interface OpenNowApi {
 
   /** Reveal a saved recording in the system file manager */
   showRecordingInFolder(id: string): Promise<void>;
+
+  deleteCache(): Promise<void>;
 }
 
 export interface ScreenshotSaveRequest {

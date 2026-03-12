@@ -1,11 +1,13 @@
 import { app } from "electron";
 import { join } from "node:path";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import type { VideoCodec, ColorQuality, VideoAccelerationPreference, MicrophoneMode, GameLanguage } from "@shared/gfn";
+import type { VideoCodec, ColorQuality, VideoAccelerationPreference, MicrophoneMode, GameLanguage, AspectRatio } from "@shared/gfn";
 
 export interface Settings {
   /** Video resolution (e.g., "1920x1080") */
   resolution: string;
+  /** Aspect ratio (16:9, 16:10, 21:9, 32:9) */
+  aspectRatio: AspectRatio;
   /** Target FPS (30, 60, 120, etc.) */
   fps: number;
   /** Maximum bitrate in Mbps (200 = unlimited) */
@@ -46,6 +48,13 @@ export interface Settings {
   microphoneDeviceId: string;
   /** Hide stream buttons (mic/fullscreen/end-session) while streaming */
   hideStreamButtons: boolean;
+  /** Enable controller-first media bar layout for library browsing */
+  controllerMode: boolean;
+  /** Play subtle sounds in controller library mode */
+  controllerUiSounds: boolean;
+  /** Auto-load controller library at startup when controller mode is enabled */
+  autoLoadControllerLibrary: boolean;
+  favoriteGameIds: string[];
   /** Window width */
   windowWidth: number;
   /** Window height */
@@ -62,6 +71,7 @@ const LEGACY_ANTI_AFK_SHORTCUTS = new Set(["META+SHIFT+F10", "CMD+SHIFT+F10", "C
 
 const DEFAULT_SETTINGS: Settings = {
   resolution: "1920x1080",
+  aspectRatio: "16:9",
   fps: 60,
   maxBitrateMbps: 75,
   codec: "H264",
@@ -80,6 +90,10 @@ const DEFAULT_SETTINGS: Settings = {
   microphoneMode: "disabled",
   microphoneDeviceId: "",
   hideStreamButtons: false,
+  controllerMode: false,
+  controllerUiSounds: false,
+  autoLoadControllerLibrary: false,
+  favoriteGameIds: [],
   sessionClockShowEveryMinutes: 60,
   sessionClockShowDurationSeconds: 30,
   windowWidth: 1400,

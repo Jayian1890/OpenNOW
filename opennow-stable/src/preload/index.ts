@@ -114,6 +114,8 @@ const api: PreloadApi = {
     ipcRenderer.invoke(IPC_CHANNELS.RECORDING_DELETE, input),
   showRecordingInFolder: (id: string): Promise<void> =>
     ipcRenderer.invoke(IPC_CHANNELS.RECORDING_SHOW_IN_FOLDER, id),
+  deleteCache: (): Promise<void> =>
+    ipcRenderer.invoke(IPC_CHANNELS.CACHE_DELETE_ALL),
 };
 
 contextBridge.exposeInMainWorld("openNow", api);
