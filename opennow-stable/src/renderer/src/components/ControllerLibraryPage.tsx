@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { JSX } from "react";
 import type { GameInfo, Settings } from "@shared/gfn";
 import { Star, Clock, Calendar, Repeat2 } from "lucide-react";
-import { ButtonA, ButtonX, ButtonY } from "./ControllerButtons";
+import { ButtonA, ButtonX, ButtonY, ButtonPSCross, ButtonPSSquare, ButtonPSTriangle } from "./ControllerButtons";
 import { getStoreDisplayName } from "./GameCard";
 import { type PlaytimeStore, formatPlaytime, formatLastPlayed } from "../utils/usePlaytime";
 
@@ -112,10 +112,45 @@ export function ControllerLibraryPage({
   const [time, setTime] = useState(new Date());
   const [selectedSettingIndex, setSelectedSettingIndex] = useState(0);
   const [microphoneDevices, setMicrophoneDevices] = useState<{ deviceId: string; label: string }[]>([]);
+  const [controllerType, setControllerType] = useState<"ps" | "xbox" | "nintendo" | "generic">("generic");
 
   useEffect(() => {
     const timer = setInterval(() => setTime(new Date()), 10000);
     return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const detectTypeFromGamepad = (g: Gamepad | null): "ps" | "xbox" | "nintendo" | "generic" => {
+      if (!g || !g.id) return "generic";
+      const id = g.id.toLowerCase();
+      if (id.includes("wireless controller") || id.includes("dualshock") || id.includes("dualsense") || id.includes("054c")) return "ps";
+      if (id.includes("xbox") || id.includes("x-input") || id.includes("xinput") || id.includes("xusb")) return "xbox";
+      if (id.includes("nintendo") || id.includes("pro controller") || id.includes("joy-con") || id.includes("joycon")) return "nintendo";
+      return "generic";
+    };
+
+    const updateFromConnected = () => {
+      try {
+        const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+        for (const p of pads) {
+          if (p && p.connected) {
+            setControllerType(detectTypeFromGamepad(p));
+            return;
+          }
+        }
+        setControllerType("generic");
+      } catch {
+        setControllerType("generic");
+      }
+    };
+
+    window.addEventListener("gamepadconnected", updateFromConnected);
+    window.addEventListener("gamepaddisconnected", updateFromConnected);
+    updateFromConnected();
+    return () => {
+      window.removeEventListener("gamepadconnected", updateFromConnected);
+      window.removeEventListener("gamepaddisconnected", updateFromConnected);
+    };
   }, []);
 
   const formatTime = (date: Date) => {
@@ -621,9 +656,20 @@ export function ControllerLibraryPage({
           </>
         ) : (
           <>
-            <div className="xmb-btn-hint"><ButtonA className="xmb-btn-icon" size={24} /> <span>Start</span></div>
-            <div className="xmb-btn-hint"><ButtonX className="xmb-btn-icon" size={24} /> <span>Store</span></div>
-            <div className="xmb-btn-hint"><ButtonY className="xmb-btn-icon" size={24} /> <span>Favorite</span></div>
+            {
+              (() => {
+                const Primary = controllerType === "ps" ? ButtonPSCross : ButtonA;
+                const Left = controllerType === "ps" ? ButtonPSSquare : ButtonX;
+                const Top = controllerType === "ps" ? ButtonPSTriangle : ButtonY;
+                return (
+                  <>
+                    <div className="xmb-btn-hint"><Primary className="xmb-btn-icon" size={24} /> <span>Start</span></div>
+                    <div className="xmb-btn-hint"><Left className="xmb-btn-icon" size={24} /> <span>Store</span></div>
+                    <div className="xmb-btn-hint"><Top className="xmb-btn-icon" size={24} /> <span>Favorite</span></div>
+                  </>
+                );
+              })()
+            }
           </>
         )}
       </div>

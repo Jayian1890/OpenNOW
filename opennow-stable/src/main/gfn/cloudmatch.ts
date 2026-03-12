@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import dns from "node:dns";
 
 import type {
   ActiveSessionInfo,
@@ -23,7 +24,36 @@ const GFN_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 NVIDIACEFClient/HEAD/debb5919f6 GFN-PC/2.0.80.173";
 const GFN_CLIENT_VERSION = "2.0.80.173";
 
-function normalizeIceServers(response: CloudMatchResponse): IceServer[] {
+async function resolveHostnameWithFallback(hostname: string): Promise<string | null> {
+  // Try system resolver first, then fall back to Cloudflare (1.1.1.1) and Google (8.8.8.8)
+  try {
+    const r = await dns.promises.lookup(hostname);
+    if (r && (r as any).address) return (r as any).address;
+  } catch {
+    // ignore and try custom resolvers
+  }
+
+  const fallbackServers = ["1.1.1.1", "8.8.8.8"];
+  for (const server of fallbackServers) {
+    try {
+      const resolver = new dns.Resolver();
+      resolver.setServers([server]);
+      const addrs: string[] = await new Promise((resolve, reject) => {
+        resolver.resolve4(hostname, (err, addresses) => {
+          if (err) reject(err);
+          else resolve(addresses);
+        });
+      });
+      if (addrs && addrs.length > 0) return addrs[0];
+    } catch {
+      // try next fallback
+    }
+  }
+
+  return null;
+}
+
+async function normalizeIceServers(response: CloudMatchResponse): Promise<IceServer[]> {
   const raw = response.session.iceServerConfiguration?.iceServers ?? [];
   const servers = raw
     .map((entry) => {
@@ -37,13 +67,57 @@ function normalizeIceServers(response: CloudMatchResponse): IceServer[] {
     .filter((entry) => entry.urls.length > 0);
 
   if (servers.length > 0) {
-    return servers;
+    // Attempt to resolve any hostnames in STUN/TURN URLs to IPs to avoid relying on the
+    // renderer's DNS resolution. This makes it possible to try alternate DNS servers
+    // when the system resolver fails.
+    const resolvedServers: IceServer[] = [];
+    for (const s of servers) {
+      const resolvedUrls: string[] = [];
+      for (const u of s.urls) {
+        try {
+          const m = u.match(/^([a-zA-Z0-9+.-]+):([^/]+)/);
+          if (m) {
+            const scheme = m[1];
+            const hostPort = m[2];
+            const host = hostPort.split(":")[0];
+            const portPart = hostPort.includes(":") ? ":" + hostPort.split(":").slice(1).join(":") : "";
+            // If host already looks like an IP, keep as-is
+            if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) || /^\[[0-9a-fA-F:]+\]$/.test(host)) {
+              resolvedUrls.push(u);
+            } else {
+              const ip = await resolveHostnameWithFallback(host);
+              if (ip) {
+                resolvedUrls.push(`${scheme}:${ip}${portPart}`);
+              } else {
+                resolvedUrls.push(u);
+              }
+            }
+          } else {
+            resolvedUrls.push(u);
+          }
+        } catch {
+          resolvedUrls.push(u);
+        }
+      }
+      resolvedServers.push({ urls: resolvedUrls, username: s.username, credential: s.credential });
+    }
+
+    return resolvedServers;
   }
 
-  return [
-    { urls: ["stun:s1.stun.gamestream.nvidia.com:19308"] },
-    { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
-  ];
+  // Default fallbacks — try to resolve known STUN hostnames to IPs as well
+  const defaults = ["s1.stun.gamestream.nvidia.com:19308", "stun.l.google.com:19302", "stun1.l.google.com:19302"];
+  const out: IceServer[] = [];
+  for (const d of defaults) {
+    const parts = d.split(":");
+    const host = parts[0];
+    const port = parts.length > 1 ? `:${parts.slice(1).join(":")}` : "";
+    const ip = await resolveHostnameWithFallback(host);
+    if (ip) out.push({ urls: [`stun:${ip}${port}`] });
+    else out.push({ urls: [`stun:${host}${port}`] });
+  }
+
+  return out;
 }
 
 /**
@@ -498,7 +572,7 @@ function extractSeatSetupStep(payload: CloudMatchResponse): number | undefined {
   return undefined;
 }
 
-function toSessionInfo(zone: string, streamingBaseUrl: string, payload: CloudMatchResponse): SessionInfo {
+async function toSessionInfo(zone: string, streamingBaseUrl: string, payload: CloudMatchResponse): Promise<SessionInfo> {
   if (payload.requestStatus.statusCode !== 1) {
     // Use SessionError for parsing error responses
     const errorJson = JSON.stringify(payload);
@@ -538,7 +612,7 @@ function toSessionInfo(zone: string, streamingBaseUrl: string, payload: CloudMat
     signalingServer: signaling.signalingServer,
     signalingUrl: signaling.signalingUrl,
     gpuType: payload.session.gpuType,
-    iceServers: normalizeIceServers(payload),
+    iceServers: await normalizeIceServers(payload),
     mediaConnectionInfo: signaling.mediaConnectionInfo,
   };
 }
@@ -570,7 +644,7 @@ export async function createSession(input: SessionCreateRequest): Promise<Sessio
   }
 
   const payload = JSON.parse(text) as CloudMatchResponse;
-  return toSessionInfo(input.zone, base, payload);
+  return await toSessionInfo(input.zone, base, payload);
 }
 
 export async function pollSession(input: SessionPollRequest): Promise<SessionInfo> {
@@ -623,7 +697,7 @@ export async function pollSession(input: SessionPollRequest): Promise<SessionInf
         const directPayload = JSON.parse(directText) as CloudMatchResponse;
         if (directPayload.requestStatus.statusCode === 1) {
           console.log("[CloudMatch] Direct re-poll succeeded, using direct response for signaling info");
-          return toSessionInfo(input.zone, directBase, directPayload);
+          return await toSessionInfo(input.zone, directBase, directPayload);
         }
       }
     } catch (e) {
@@ -632,7 +706,7 @@ export async function pollSession(input: SessionPollRequest): Promise<SessionInf
     }
   }
 
-  return toSessionInfo(input.zone, base, payload);
+  return await toSessionInfo(input.zone, base, payload);
 }
 
 export async function stopSession(input: SessionStopRequest): Promise<void> {
@@ -1003,7 +1077,7 @@ export async function claimSession(input: SessionClaimRequest): Promise<SessionI
         signalingServer: signaling.signalingServer,
         signalingUrl: signaling.signalingUrl,
         gpuType: sessionData.gpuType,
-        iceServers: normalizeIceServers(pollApiResponse),
+        iceServers: await normalizeIceServers(pollApiResponse),
         mediaConnectionInfo: signaling.mediaConnectionInfo,
       };
     }
