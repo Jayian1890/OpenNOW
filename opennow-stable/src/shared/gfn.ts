@@ -412,6 +412,15 @@ export interface OpenNowApi {
   /** Reveal a saved recording in the system file manager */
   showRecordingInFolder(id: string): Promise<void>;
 
+  /** List screenshot and recording media, optionally filtered by game title */
+  listMediaByGame(input?: { gameTitle?: string }): Promise<MediaListingResult>;
+
+  /** Resolve a thumbnail data URL for a media file path */
+  getMediaThumbnail(input: { filePath: string }): Promise<string | null>;
+
+  /** Reveal a media file path in the system file manager */
+  showMediaInFolder(input: { filePath: string }): Promise<void>;
+
   deleteCache(): Promise<void>;
 }
 
@@ -479,4 +488,21 @@ export interface RecordingAbortRequest {
 
 export interface RecordingDeleteRequest {
   id: string;
+}
+
+export interface MediaListingEntry {
+  id: string;
+  fileName: string;
+  filePath: string;
+  createdAtMs: number;
+  sizeBytes: number;
+  gameTitle?: string;
+  durationMs?: number;
+  thumbnailDataUrl?: string;
+  dataUrl?: string;
+}
+
+export interface MediaListingResult {
+  screenshots: MediaListingEntry[];
+  videos: MediaListingEntry[];
 }

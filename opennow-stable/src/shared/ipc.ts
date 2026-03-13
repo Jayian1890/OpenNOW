@@ -44,6 +44,10 @@ export const IPC_CHANNELS = {
   CACHE_REFRESH_MANUAL: "cache:refresh-manual",
   CACHE_STATUS_UPDATE: "cache:status-update",
   CACHE_DELETE_ALL: "cache:delete-all",
+  // Media browsing
+  MEDIA_LIST_BY_GAME: "media:list-by-game",
+  MEDIA_THUMBNAIL: "media:thumbnail",
+  MEDIA_SHOW_IN_FOLDER: "media:show-in-folder",
 } as const;
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS];

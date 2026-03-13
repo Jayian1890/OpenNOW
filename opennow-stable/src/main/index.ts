@@ -4,7 +4,8 @@ import { dirname, join } from "node:path";
 import { existsSync, readFileSync, createWriteStream } from "node:fs";
 import { copyFile, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import * as net from "node:net";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 
 // Keyboard shortcuts reference (matching Rust implementation):
 // Screenshot keybind - configurable, handled in renderer
@@ -340,6 +341,72 @@ const activeRecordings = new Map<string, ActiveRecording>();
 
 function getRecordingsDirectory(): string {
   return join(app.getPath("pictures"), "OpenNOW", "Recordings");
+}
+
+function getThumbnailCacheDirectory(): string {
+  return join(app.getPath("userData"), "media-thumbs");
+}
+
+async function ensureThumbnailCacheDirectory(): Promise<string> {
+  const dir = getThumbnailCacheDirectory();
+  await mkdir(dir, { recursive: true });
+  return dir;
+}
+
+function md5(input: string): string {
+  return createHash("md5").update(input).digest("hex");
+}
+
+async function generateVideoThumbnail(sourcePath: string, outPath: string): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    // Try to run ffmpeg to extract a frame at 1s.
+    const args = ["-y", "-ss", "1", "-i", sourcePath, "-frames:v", "1", "-q:v", "2", outPath];
+    const child = spawn("ffmpeg", args, { stdio: "ignore" });
+    child.on("error", () => resolve(false));
+    child.on("close", (code) => {
+      resolve(code === 0);
+    });
+  });
+}
+
+async function ensureThumbnailForMedia(filePath: string): Promise<string | null> {
+  try {
+    const stats = await stat(filePath);
+    const key = md5(`${filePath}|${stats.mtimeMs}`);
+    const cacheDir = await ensureThumbnailCacheDirectory();
+    const outPath = join(cacheDir, `${key}.jpg`);
+    // If cached, return
+    try {
+      await stat(outPath);
+      return outPath;
+    } catch {
+      // not exists
+    }
+
+    const lower = filePath.toLowerCase();
+    if (lower.endsWith(".mp4") || lower.endsWith(".webm") || lower.endsWith(".mkv") || lower.endsWith(".mov")) {
+      const ok = await generateVideoThumbnail(filePath, outPath);
+      if (ok) return outPath;
+      // generation failed
+      return null;
+    }
+
+    // For images, copy into cache (no re-encoding)
+    if (lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".webp")) {
+      try {
+        const buf = await readFile(filePath);
+        await writeFile(outPath, buf);
+        return outPath;
+      } catch {
+        return null;
+      }
+    }
+
+    return null;
+  } catch (err) {
+    console.warn("ensureThumbnailForMedia error:", err);
+    return null;
+  }
 }
 
 async function ensureRecordingsDirectory(): Promise<string> {
@@ -755,6 +822,33 @@ function registerIpcHandlers(): void {
     return listScreenshots();
   });
 
+  // Media: per-game listing (screenshots + recordings). Best-effort title matching.
+  ipcMain.handle(IPC_CHANNELS.MEDIA_LIST_BY_GAME, async (_event, payload: { gameTitle?: string } = {}) => {
+    const title = (payload?.gameTitle || "").trim().toLowerCase();
+    const screenshots = await listScreenshots();
+    const recordings = await listRecordings();
+
+    const normalize = (s?: string) => (s || "").replace(/[^a-z0-9]+/gi, "").toLowerCase();
+    const needle = normalize(title);
+
+    const matchedScreens = screenshots.filter((s) => {
+      if (!needle) return true;
+      const candidate = normalize(s.fileName) + normalize(s.filePath || "");
+      return candidate.includes(needle);
+    });
+
+    const matchedRecordings = recordings.filter((r) => {
+      if (!needle) return true;
+      const candidate = normalize(r.gameTitle ?? r.fileName ?? "");
+      return candidate.includes(needle);
+    });
+
+    return {
+      screenshots: matchedScreens,
+      videos: matchedRecordings,
+    };
+  });
+
   ipcMain.handle(IPC_CHANNELS.SCREENSHOT_DELETE, async (_event, input: ScreenshotDeleteRequest): Promise<void> => {
     return deleteScreenshot(input);
   });
@@ -881,6 +975,60 @@ function registerIpcHandlers(): void {
     assertSafeRecordingId(id);
     const dir = await ensureRecordingsDirectory();
     shell.showItemInFolder(join(dir, id));
+  });
+
+  // Return a thumbnail data URL for a given media file path (images or companion thumbs for videos).
+  ipcMain.handle(IPC_CHANNELS.MEDIA_THUMBNAIL, async (_event, payload: { filePath: string }): Promise<string | null> => {
+    const fp = payload?.filePath;
+    if (!fp) return null;
+    try {
+      const allowedRoot = join(app.getPath("pictures"), "OpenNOW");
+      if (!fp.startsWith(allowedRoot)) return null;
+      const lower = fp.toLowerCase();
+      if (lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".webp")) {
+        const buf = await readFile(fp);
+        const extMatch = /\.([^.]+)$/.exec(fp);
+        const ext = (extMatch?.[1] || "png").toLowerCase();
+        const mime = ext === "jpg" || ext === "jpeg" ? "image/jpeg" : ext === "webp" ? "image/webp" : "image/png";
+        return `data:${mime};base64,${buf.toString("base64")}`;
+      }
+
+      if (lower.endsWith(".mp4") || lower.endsWith(".webm") || lower.endsWith(".mkv") || lower.endsWith(".mov")) {
+        // Prefer an existing companion thumb next to the video
+        const stem = fp.replace(/\.(mp4|webm|mkv|mov)$/i, "");
+        const thumbPath = `${stem}-thumb.jpg`;
+        try {
+          const b = await readFile(thumbPath);
+          return `data:image/jpeg;base64,${b.toString("base64")}`;
+        } catch {
+          // Try generating a cached thumbnail via ffmpeg
+        }
+
+        const gen = await ensureThumbnailForMedia(fp);
+        if (gen) {
+          try {
+            const b2 = await readFile(gen);
+            return `data:image/jpeg;base64,${b2.toString("base64")}`;
+          } catch {
+            return null;
+          }
+        }
+        return null;
+      }
+
+      return null;
+    } catch (err) {
+      console.warn("MEDIA_THUMBNAIL error:", err);
+      return null;
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MEDIA_SHOW_IN_FOLDER, async (_event, payload: { filePath: string }): Promise<void> => {
+    const fp = payload?.filePath;
+    if (!fp) return;
+    const allowedRoot = join(app.getPath("pictures"), "OpenNOW");
+    if (!fp.startsWith(allowedRoot)) return;
+    shell.showItemInFolder(fp);
   });
 
   ipcMain.handle(IPC_CHANNELS.CACHE_REFRESH_MANUAL, async (): Promise<void> => {

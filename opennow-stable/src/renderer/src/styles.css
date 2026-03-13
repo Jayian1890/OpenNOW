@@ -1052,6 +1052,7 @@ body.controller-mode.controller-hide-cursor * {
 }
 
 
+
 /* ======================================================
    LOGIN SCREEN
    ====================================================== */
@@ -5504,13 +5505,17 @@ button.game-card-store-chip.active:hover {
 /* Highlight subcategory items in root with a visual indicator */
 .xmb-game-item[data-subcategory-id="network"],
 .xmb-game-item[data-subcategory-id="audio"],
-.xmb-game-item[data-subcategory-id="system"] {
+.xmb-game-item[data-subcategory-id="system"],
+.xmb-game-item[data-subcategory-id="videos"],
+.xmb-game-item[data-subcategory-id="screenshots"] {
   position: relative;
 }
 
 .xmb-game-item[data-subcategory-id="network"]::after,
 .xmb-game-item[data-subcategory-id="audio"]::after,
-.xmb-game-item[data-subcategory-id="system"]::after {
+.xmb-game-item[data-subcategory-id="system"]::after,
+.xmb-game-item[data-subcategory-id="videos"]::after,
+.xmb-game-item[data-subcategory-id="screenshots"]::after {
   content: "▶";
   position: absolute;
   right: 24px;
@@ -5522,7 +5527,9 @@ button.game-card-store-chip.active:hover {
 
 .xmb-game-item[data-subcategory-id="network"].active::after,
 .xmb-game-item[data-subcategory-id="audio"].active::after,
-.xmb-game-item[data-subcategory-id="system"].active::after {
+.xmb-game-item[data-subcategory-id="system"].active::after,
+.xmb-game-item[data-subcategory-id="videos"].active::after,
+.xmb-game-item[data-subcategory-id="screenshots"].active::after {
   opacity: 1;
   color: var(--accent);
 }

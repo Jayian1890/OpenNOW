@@ -30,12 +30,10 @@ import type {
   RecordingAbortRequest,
   RecordingEntry,
   RecordingDeleteRequest,
+  MediaListingResult,
 } from "@shared/gfn";
 
-// Extend the OpenNowApi interface for internal preload use
-type PreloadApi = OpenNowApi;
-
-const api: PreloadApi = {
+const api: OpenNowApi = {
   getAuthSession: (input: AuthSessionRequest = {}) => ipcRenderer.invoke(IPC_CHANNELS.AUTH_GET_SESSION, input),
   getLoginProviders: () => ipcRenderer.invoke(IPC_CHANNELS.AUTH_GET_PROVIDERS),
   getRegions: (input: RegionsFetchRequest = {}) => ipcRenderer.invoke(IPC_CHANNELS.AUTH_GET_REGIONS, input),
@@ -115,6 +113,11 @@ const api: PreloadApi = {
     ipcRenderer.invoke(IPC_CHANNELS.RECORDING_DELETE, input),
   showRecordingInFolder: (id: string): Promise<void> =>
     ipcRenderer.invoke(IPC_CHANNELS.RECORDING_SHOW_IN_FOLDER, id),
+  listMediaByGame: (input: { gameTitle?: string } = {}): Promise<MediaListingResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.MEDIA_LIST_BY_GAME, input),
+  getMediaThumbnail: (input: { filePath: string }) => ipcRenderer.invoke(IPC_CHANNELS.MEDIA_THUMBNAIL, input),
+  showMediaInFolder: (input: { filePath: string }): Promise<void> =>
+    ipcRenderer.invoke(IPC_CHANNELS.MEDIA_SHOW_IN_FOLDER, input),
   deleteCache: (): Promise<void> =>
     ipcRenderer.invoke(IPC_CHANNELS.CACHE_DELETE_ALL),
 };

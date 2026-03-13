@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { JSX } from "react";
-import type { GameInfo, Settings } from "@shared/gfn";
+import type { GameInfo, MediaListingEntry, Settings } from "@shared/gfn";
 import { Star, Clock, Calendar, Repeat2 } from "lucide-react";
 import { ButtonA, ButtonB, ButtonX, ButtonY, ButtonPSCross, ButtonPSCircle, ButtonPSSquare, ButtonPSTriangle } from "./ControllerButtons";
 import { getStoreDisplayName } from "./GameCard";
@@ -42,8 +42,10 @@ interface ControllerLibraryPageProps {
 }
 
 type Direction = "up" | "down" | "left" | "right";
-type TopCategory = "current" | "all" | "settings" | "favorites" | `genre:${string}`;
+type TopCategory = "current" | "all" | "settings" | "media" | "favorites" | `genre:${string}`;
 type SoundKind = "move" | "confirm";
+type SettingsSubcategory = "root" | "Network" | "Audio" | "System";
+type MediaSubcategory = "root" | "Videos" | "Screenshots";
 
 const CATEGORY_STEP_PX = 160;
 const CATEGORY_ACTIVE_HALF_WIDTH_PX = 60;
@@ -59,6 +61,7 @@ function getCategoryLabel(categoryId: string, currentGameTitle?: string): { labe
   if (categoryId === "current") return { label: currentGameTitle || "Current" };
   if (categoryId === "all") return { label: "All" };
   if (categoryId === "settings") return { label: "Settings" };
+  if (categoryId === "media") return { label: "Media" };
   if (categoryId === "favorites") return { label: "Favorites" };
   const genreName = sanitizeGenreName(categoryId.slice(6));
   const shorthand: Record<string, string> = {
@@ -104,7 +107,7 @@ export function ControllerLibraryPage({
   aspectRatioOptions = [],
   onSettingChange,
 }: ControllerLibraryPageProps): JSX.Element {
-  const initialCategoryIndex = currentStreamingGame ? 0 : 1;
+  const initialCategoryIndex = currentStreamingGame ? 0 : 2;
   const [categoryIndex, setCategoryIndex] = useState(initialCategoryIndex);
   const audioContextRef = useRef<AudioContext | null>(null);
   const itemsContainerRef = useRef<HTMLDivElement>(null);
@@ -113,8 +116,16 @@ export function ControllerLibraryPage({
   const [time, setTime] = useState(new Date());
   const [selectedSettingIndex, setSelectedSettingIndex] = useState(0);
   const [microphoneDevices, setMicrophoneDevices] = useState<{ deviceId: string; label: string }[]>([]);
-  const [settingsSubcategory, setSettingsSubcategory] = useState<'root'|'Network'|'Audio'|'System'>('root');
+  const [settingsSubcategory, setSettingsSubcategory] = useState<SettingsSubcategory>("root");
   const [lastRootSettingIndex, setLastRootSettingIndex] = useState(0);
+  const [mediaSubcategory, setMediaSubcategory] = useState<MediaSubcategory>("root");
+  const [lastRootMediaIndex, setLastRootMediaIndex] = useState(0);
+  const [selectedMediaIndex, setSelectedMediaIndex] = useState(0);
+  const [mediaLoading, setMediaLoading] = useState(false);
+  const [mediaError, setMediaError] = useState<string | null>(null);
+  const [mediaVideos, setMediaVideos] = useState<MediaListingEntry[]>([]);
+  const [mediaScreenshots, setMediaScreenshots] = useState<MediaListingEntry[]>([]);
+  const [mediaThumbById, setMediaThumbById] = useState<Record<string, string>>({});
   const [controllerType, setControllerType] = useState<"ps" | "xbox" | "nintendo" | "generic">("generic");
   const [editingBandwidth, setEditingBandwidth] = useState(false);
 
@@ -204,8 +215,12 @@ export function ControllerLibraryPage({
     const categories: Array<{ id: TopCategory; label: string }> = [];
     if (currentStreamingGame) {
       categories.push({ id: "current", label: currentStreamingGame.title || "Current Game" });
+      categories.push({ id: "media", label: "Media" });
     }
     categories.push({ id: "settings", label: "Settings" });
+    if (!currentStreamingGame) {
+      categories.push({ id: "media", label: "Media" });
+    }
     categories.push({ id: "all", label: "All" });
     categories.push({ id: "favorites", label: "Favorites" });
     for (const genre of allGenres) categories.push({ id: `genre:${genre}`, label: sanitizeGenreName(genre) });
@@ -257,11 +272,23 @@ export function ControllerLibraryPage({
     { id: "closeGame", label: "Close Game", value: "" },
   ], []);
 
+  const mediaRootItems = useMemo(() => [
+    { id: "videos", label: "Videos", value: "" },
+    { id: "screenshots", label: "Screenshots", value: "" },
+  ], []);
+
+  const mediaAssetItems = useMemo(() => {
+    if (mediaSubcategory === "Videos") return mediaVideos;
+    if (mediaSubcategory === "Screenshots") return mediaScreenshots;
+    return [];
+  }, [mediaSubcategory, mediaVideos, mediaScreenshots]);
+
   const displayItems = useMemo(() => {
     if (topCategory === "current") return currentGameItems;
     if (topCategory === "settings") return settingsBySubcategory[settingsSubcategory] ?? [];
+    if (topCategory === "media" && mediaSubcategory === "root") return mediaRootItems;
     return [];
-  }, [topCategory, currentGameItems, settingsBySubcategory, settingsSubcategory]);
+  }, [topCategory, currentGameItems, settingsBySubcategory, settingsSubcategory, mediaSubcategory, mediaRootItems]);
 
   useEffect(() => {
     let mounted = true;
@@ -280,6 +307,64 @@ export function ControllerLibraryPage({
     });
     return () => { mounted = false; };
   }, []);
+
+  useEffect(() => {
+    if (topCategory !== "media" || mediaSubcategory === "root") return;
+    if (typeof window.openNow?.listMediaByGame !== "function") {
+      setMediaVideos([]);
+      setMediaScreenshots([]);
+      setMediaThumbById({});
+      setMediaError("Media API unavailable");
+      setMediaLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    const loadMedia = async () => {
+      try {
+        setMediaLoading(true);
+        setMediaError(null);
+        const listing = await window.openNow.listMediaByGame({});
+        if (cancelled) return;
+
+        const videos = [...(listing.videos ?? [])].sort((a, b) => b.createdAtMs - a.createdAtMs);
+        const screenshots = [...(listing.screenshots ?? [])].sort((a, b) => b.createdAtMs - a.createdAtMs);
+
+        setMediaVideos(videos);
+        setMediaScreenshots(screenshots);
+
+        const allItems = [...videos, ...screenshots];
+        const thumbEntries = await Promise.all(
+          allItems.map(async (item): Promise<[string, string | null]> => {
+            if (item.thumbnailDataUrl) return [item.id, item.thumbnailDataUrl];
+            if (item.dataUrl) return [item.id, item.dataUrl];
+            if (typeof window.openNow?.getMediaThumbnail === "function") {
+              const generated = await window.openNow.getMediaThumbnail({ filePath: item.filePath });
+              return [item.id, generated];
+            }
+            return [item.id, null];
+          }),
+        );
+
+        if (cancelled) return;
+        const thumbMap: Record<string, string> = {};
+        for (const [id, url] of thumbEntries) {
+          if (url) thumbMap[id] = url;
+        }
+        setMediaThumbById(thumbMap);
+      } catch {
+        if (cancelled) return;
+        setMediaError("Failed to load media");
+      } finally {
+        if (!cancelled) setMediaLoading(false);
+      }
+    };
+
+    void loadMedia();
+    return () => {
+      cancelled = true;
+    };
+  }, [topCategory, mediaSubcategory]);
 
   const categorizedGames = useMemo(() => {
     if (topCategory === "settings") return [];
@@ -355,6 +440,8 @@ export function ControllerLibraryPage({
         setCategoryIndex((prev) => (prev - 1 + TOP_CATEGORIES.length) % TOP_CATEGORIES.length);
         setSelectedSettingIndex(0);
         setSettingsSubcategory("root");
+        setSelectedMediaIndex(0);
+        setMediaSubcategory("root");
         return;
       }
       if (direction === "right") {
@@ -363,6 +450,8 @@ export function ControllerLibraryPage({
         setCategoryIndex((prev) => (prev + 1) % TOP_CATEGORIES.length);
         setSelectedSettingIndex(0);
         setSettingsSubcategory("root");
+        setSelectedMediaIndex(0);
+        setMediaSubcategory("root");
         return;
       }
       if (topCategory === "current" || topCategory === "settings") {
@@ -379,6 +468,27 @@ export function ControllerLibraryPage({
           if (nextIndex !== selectedSettingIndex) {
             playUiSound("move");
             setSelectedSettingIndex(nextIndex);
+          }
+          return;
+        }
+        return;
+      }
+      if (topCategory === "media") {
+        const itemCount = mediaSubcategory === "root" ? displayItems.length : mediaAssetItems.length;
+        if (itemCount === 0) return;
+        if (direction === "up") {
+          const nextIndex = Math.max(0, selectedMediaIndex - 1);
+          if (nextIndex !== selectedMediaIndex) {
+            playUiSound("move");
+            setSelectedMediaIndex(nextIndex);
+          }
+          return;
+        }
+        if (direction === "down") {
+          const nextIndex = Math.min(itemCount - 1, selectedMediaIndex + 1);
+          if (nextIndex !== selectedMediaIndex) {
+            playUiSound("move");
+            setSelectedMediaIndex(nextIndex);
           }
           return;
         }
@@ -453,6 +563,26 @@ export function ControllerLibraryPage({
           setSelectedSettingIndex(0);
           return;
         }
+        playUiSound("confirm");
+      } else if (topCategory === "media") {
+        const item = displayItems[selectedMediaIndex];
+        if (mediaSubcategory === "root" && item && (item.id === "videos" || item.id === "screenshots")) {
+          setLastRootMediaIndex(selectedMediaIndex);
+          setMediaSubcategory(item.id === "videos" ? "Videos" : "Screenshots");
+          setSelectedMediaIndex(0);
+          playUiSound("confirm");
+          return;
+        }
+
+        if (mediaSubcategory !== "root") {
+          const selectedMedia = mediaAssetItems[selectedMediaIndex];
+          if (selectedMedia && typeof window.openNow?.showMediaInFolder === "function") {
+            void window.openNow.showMediaInFolder({ filePath: selectedMedia.filePath });
+            playUiSound("confirm");
+            return;
+          }
+        }
+
         playUiSound("confirm");
       } else if (selectedGame) {
         onPlayGame(selectedGame);
@@ -549,6 +679,11 @@ export function ControllerLibraryPage({
         playUiSound("move");
         return;
       }
+      if (topCategory === "media" && mediaSubcategory !== "root") {
+        setMediaSubcategory("root");
+        setSelectedMediaIndex(lastRootMediaIndex);
+        playUiSound("move");
+      }
     };
 
     const kbdHandler = (e: KeyboardEvent) => {
@@ -581,9 +716,9 @@ export function ControllerLibraryPage({
       window.removeEventListener("opennow:controller-cancel", cancelHandler);
       window.removeEventListener("keydown", kbdHandler);
     };
-  }, [isLoading, TOP_CATEGORIES.length, categorizedGames, selectedIndex, selectedGame, selectedVariantId, onPlayGame, onSelectGameVariant, onOpenSettings, playUiSound, throttledOnSelectGame, toggleFavoriteForSelected, topCategory, selectedSettingIndex, displayItems, settings, settingsBySubcategory, settingsSubcategory, lastRootSettingIndex, onSettingChange, resolutionOptions, fpsOptions, codecOptions, aspectRatioOptions, currentStreamingGame, onResumeGame, onCloseGame, editingBandwidth]);
+  }, [isLoading, TOP_CATEGORIES.length, categorizedGames, selectedIndex, selectedGame, selectedVariantId, onPlayGame, onSelectGameVariant, onOpenSettings, playUiSound, throttledOnSelectGame, toggleFavoriteForSelected, topCategory, selectedSettingIndex, selectedMediaIndex, displayItems, mediaAssetItems.length, mediaSubcategory, settings, settingsBySubcategory, settingsSubcategory, lastRootSettingIndex, lastRootMediaIndex, onSettingChange, resolutionOptions, fpsOptions, codecOptions, aspectRatioOptions, currentStreamingGame, onResumeGame, onCloseGame, editingBandwidth]);
 
-  if (isLoading && topCategory !== "settings" && topCategory !== "current") return <div className="xmb-wrapper"><div className="xmb-bg-layer"><div className="xmb-bg-gradient" /></div><div style={{display:'flex',justifyContent:'center',alignItems:'center',height:'100vh'}}>Loading...</div></div>;
+  if (isLoading && topCategory !== "settings" && topCategory !== "current" && topCategory !== "media") return <div className="xmb-wrapper"><div className="xmb-bg-layer"><div className="xmb-bg-gradient" /></div><div style={{display:'flex',justifyContent:'center',alignItems:'center',height:'100vh'}}>Loading...</div></div>;
 
   return (
     <div className="xmb-wrapper">
@@ -634,7 +769,7 @@ export function ControllerLibraryPage({
             })}
       </div>
 
-      {topCategory !== "settings" && topCategory !== "current" && (
+      {topCategory !== "settings" && topCategory !== "current" && topCategory !== "media" && (
       <div
         ref={itemsContainerRef}
         className="xmb-items-container"
@@ -708,22 +843,23 @@ export function ControllerLibraryPage({
       </div>
       )}
 
-      {(topCategory === "settings" || topCategory === "current") && (
+      {(topCategory === "settings" || topCategory === "current" || (topCategory === "media" && mediaSubcategory === "root")) && (
       <div
         ref={itemsContainerRef}
         className="xmb-items-container"
         style={{
-          transform: `translate(${-GAME_ACTIVE_CENTER_OFFSET_X_PX}px, ${-selectedSettingIndex * 120}px)`,
+          transform: `translate(${-GAME_ACTIVE_CENTER_OFFSET_X_PX}px, ${-(topCategory === "media" ? selectedMediaIndex : selectedSettingIndex) * 120}px)`,
         }}
       >
         {displayItems.map((item, idx) => {
-          const isActive = idx === selectedSettingIndex;
+          const isActive = idx === (topCategory === "media" ? selectedMediaIndex : selectedSettingIndex);
           const isSubcategoryItem = settingsSubcategory === "root" && (item.id === "network" || item.id === "audio" || item.id === "system");
+          const isMediaSubcategoryItem = topCategory === "media" && mediaSubcategory === "root" && (item.id === "videos" || item.id === "screenshots");
           return (
             <div 
               key={item.id} 
               className={`xmb-game-item ${isActive ? 'active' : ''}`}
-              data-subcategory-id={isSubcategoryItem ? item.id : undefined}
+              data-subcategory-id={isSubcategoryItem || isMediaSubcategoryItem ? item.id : undefined}
             >
               <div className="xmb-game-info">
                 <div className="xmb-game-title">{item.label}</div>
@@ -755,6 +891,64 @@ export function ControllerLibraryPage({
       </div>
       )}
 
+      {topCategory === "media" && mediaSubcategory !== "root" && (
+      <div
+        ref={itemsContainerRef}
+        className="xmb-items-container"
+        style={{
+          transform: `translate(${-GAME_ACTIVE_CENTER_OFFSET_X_PX}px, ${-selectedMediaIndex * 120}px)`,
+        }}
+      >
+        {mediaLoading && (
+          <div className="xmb-game-item active">
+            <div className="xmb-game-info">
+              <div className="xmb-game-title">Loading {mediaSubcategory}...</div>
+            </div>
+          </div>
+        )}
+
+        {!mediaLoading && mediaError && (
+          <div className="xmb-game-item active">
+            <div className="xmb-game-info">
+              <div className="xmb-game-title">{mediaError}</div>
+            </div>
+          </div>
+        )}
+
+        {!mediaLoading && !mediaError && mediaAssetItems.length === 0 && (
+          <div className="xmb-game-item active">
+            <div className="xmb-game-info">
+              <div className="xmb-game-title">No {mediaSubcategory.toLowerCase()} found</div>
+            </div>
+          </div>
+        )}
+
+        {!mediaLoading && !mediaError && mediaAssetItems.map((item, idx) => {
+          const isActive = idx === selectedMediaIndex;
+          const thumb = mediaThumbById[item.id];
+          const dateLabel = new Date(item.createdAtMs).toLocaleDateString();
+          const durationMs = item.durationMs ?? 0;
+          const hasDuration = durationMs > 0;
+          const durationLabel = hasDuration ? `${Math.max(1, Math.round(durationMs / 1000))}s` : "Screenshot";
+
+          return (
+            <div key={item.id} className={`xmb-game-item ${isActive ? "active" : ""}`}>
+              <div className="xmb-game-poster-container">
+                {thumb ? <img src={thumb} className="xmb-game-poster" /> : <div className="xmb-game-poster" />}
+              </div>
+              <div className="xmb-game-info">
+                <div className="xmb-game-title">{item.gameTitle || item.fileName}</div>
+                <div className="xmb-game-meta">
+                  <span className="xmb-game-meta-chip">{durationLabel}</span>
+                  <span className="xmb-game-meta-chip">{dateLabel}</span>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      )}
+
       <div className={`xmb-detail-layer ${selectedGame ? 'visible' : ''}`}>
           {topCategory === "current" && (
             <div className="xmb-current-detail">
@@ -771,13 +965,27 @@ export function ControllerLibraryPage({
       <div className="xmb-footer">
         {topCategory === "current" ? (
           <>
-            <div className="xmb-btn-hint" style={{margin: '0 auto'}}><ButtonA className="xmb-btn-icon" size={24} /> <span>Select</span></div>
+            <div className="xmb-btn-hint" style={{margin: '0 auto'}}>
+              {controllerType === "ps" ? (
+                <ButtonPSCross className="xmb-btn-icon" size={24} />
+              ) : (
+                <ButtonA className="xmb-btn-icon" size={24} />
+              )}
+              <span>Select</span>
+            </div>
           </>
         ) : topCategory === "settings" ? (
           <>
             {settingsSubcategory === "root" ? (
               <>
-                <div className="xmb-btn-hint"><ButtonA className="xmb-btn-icon" size={24} /> <span>Enter</span></div>
+                <div className="xmb-btn-hint">
+                  {controllerType === "ps" ? (
+                    <ButtonPSCross className="xmb-btn-icon" size={24} />
+                  ) : (
+                    <ButtonA className="xmb-btn-icon" size={24} />
+                  )}
+                  <span>Enter</span>
+                </div>
               </>
             ) : (
               <>
@@ -796,6 +1004,38 @@ export function ControllerLibraryPage({
                     <ButtonA className="xmb-btn-icon" size={24} />
                   )}
                   <span>Toggle</span>
+                </div>
+              </>
+            )}
+          </>
+        ) : topCategory === "media" ? (
+          <>
+            {mediaSubcategory === "root" ? (
+              <div className="xmb-btn-hint">
+                {controllerType === "ps" ? (
+                  <ButtonPSCross className="xmb-btn-icon" size={24} />
+                ) : (
+                  <ButtonA className="xmb-btn-icon" size={24} />
+                )}
+                <span>Enter</span>
+              </div>
+            ) : (
+              <>
+                <div className="xmb-btn-hint">
+                  {controllerType === "ps" ? (
+                    <ButtonPSCross className="xmb-btn-icon" size={24} />
+                  ) : (
+                    <ButtonA className="xmb-btn-icon" size={24} />
+                  )}
+                  <span>Open Folder</span>
+                </div>
+                <div className="xmb-btn-hint">
+                  {controllerType === "ps" ? (
+                    <ButtonPSCircle className="xmb-btn-icon" size={24} />
+                  ) : (
+                    <ButtonB className="xmb-btn-icon" size={24} />
+                  )}
+                  <span>Back</span>
                 </div>
               </>
             )}
