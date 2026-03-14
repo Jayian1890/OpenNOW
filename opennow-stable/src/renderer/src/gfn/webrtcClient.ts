@@ -176,6 +176,15 @@ export interface StreamDiagnostics {
   micEnabled: boolean;
 }
 
+export interface CursorState {
+  visible: boolean;
+  imageDataUrl: string | null;
+  hotspotX: number;
+  hotspotY: number;
+  naturalWidth: number;
+  naturalHeight: number;
+}
+
 export interface StreamTimeWarning {
   code: 1 | 2 | 3;
   secondsLeft?: number;
@@ -197,6 +206,8 @@ interface ClientOptions {
   onEscHoldProgress?: (visible: boolean, progress: number) => void;
   onTimeWarning?: (warning: StreamTimeWarning) => void;
   onMicStateChange?: (state: MicStateChange) => void;
+  onCursorVisibilityChange?: (visible: boolean) => void;
+  getCursorCanvas?: () => HTMLCanvasElement | null;
 }
 
 function timestampUs(sourceTimestampMs?: number): bigint {
@@ -439,6 +450,21 @@ export class GfnWebRtcClient {
   private reliableInputChannel: RTCDataChannel | null = null;
   private mouseInputChannel: RTCDataChannel | null = null;
   private controlChannel: RTCDataChannel | null = null;
+  private cursorChannel: RTCDataChannel | null = null;
+
+  private localCursorX = 0;
+  private localCursorY = 0;
+
+  private cursorState: CursorState = {
+    visible: false,
+    imageDataUrl: null,
+    hotspotX: 0,
+    hotspotY: 0,
+    naturalWidth: 0,
+    naturalHeight: 0,
+  };
+  private cursorImageBitmap: ImageBitmap | null = null;
+
   private audioContext: AudioContext | null = null;
 
   private inputReady = false;
@@ -862,12 +888,19 @@ export class GfnWebRtcClient {
       this.controlChannel.onclose = null;
       this.controlChannel.onerror = null;
     }
+    if (this.cursorChannel) {
+      this.cursorChannel.onmessage = null;
+      this.cursorChannel.onclose = null;
+      this.cursorChannel.onerror = null;
+    }
     this.reliableInputChannel?.close();
     this.mouseInputChannel?.close();
     this.controlChannel?.close();
+    this.cursorChannel?.close();
     this.reliableInputChannel = null;
     this.mouseInputChannel = null;
     this.controlChannel = null;
+    this.cursorChannel = null;
   }
 
   private clearTimers(): void {
@@ -1397,6 +1430,20 @@ export class GfnWebRtcClient {
     this.inputQueueDropCount = 0;
     this.inputQueuePressureLoggedAtMs = 0;
     this.inputEncoder.resetGamepadSequences();
+    this.localCursorX = 0;
+    this.localCursorY = 0;
+    this.cursorImageBitmap?.close();
+    this.cursorImageBitmap = null;
+    this.cursorState = {
+      visible: false,
+      imageDataUrl: null,
+      hotspotX: 0,
+      hotspotY: 0,
+      naturalWidth: 0,
+      naturalHeight: 0,
+    };
+    this.clearCursorCanvas();
+    this.options.onCursorVisibilityChange?.(false);
   }
 
   private attachTrack(track: MediaStreamTrack): void {
@@ -1771,6 +1818,106 @@ export class GfnWebRtcClient {
     return null;
   }
 
+  private async onCursorChannelMessage(data: ArrayBuffer): Promise<void> {
+    const bytes = new Uint8Array(data);
+    if (bytes.length === 0) return;
+
+    const visible = bytes[0] !== 0;
+
+    if (!visible) {
+      if (this.cursorState.visible) {
+        this.cursorState = { ...this.cursorState, visible: false };
+        this.options.onCursorVisibilityChange?.(false);
+        this.clearCursorCanvas();
+      }
+      return;
+    }
+
+    if (bytes.length < 5) {
+      if (!this.cursorState.visible) {
+        this.cursorState = { ...this.cursorState, visible: true };
+        this.options.onCursorVisibilityChange?.(true);
+      }
+      return;
+    }
+
+    const view = new DataView(data);
+    const hotspotX = view.getUint16(1, true);
+    const hotspotY = view.getUint16(3, true);
+    const imageBytes = bytes.slice(5);
+
+    const isPng =
+      imageBytes.length >= 8 &&
+      imageBytes[0] === 0x89 &&
+      imageBytes[1] === 0x50 &&
+      imageBytes[2] === 0x4e &&
+      imageBytes[3] === 0x47;
+
+    if (!isPng) {
+      this.log(
+        `Cursor channel: unknown image format (first 4 bytes: ${Array.from(imageBytes.slice(0, 4))
+          .map((b) => b.toString(16).padStart(2, "0"))
+          .join(" ")}), ignoring`
+      );
+      return;
+    }
+
+    let binary = "";
+    for (let i = 0; i < imageBytes.length; i++) {
+      binary += String.fromCharCode(imageBytes[i] as number);
+    }
+    const imageDataUrl = `data:image/png;base64,${btoa(binary)}`;
+
+    try {
+      const blob = new Blob([imageBytes], { type: "image/png" });
+      const bitmap = await createImageBitmap(blob);
+      this.cursorImageBitmap = bitmap;
+      this.cursorState = {
+        visible: true,
+        imageDataUrl,
+        hotspotX,
+        hotspotY,
+        naturalWidth: bitmap.width,
+        naturalHeight: bitmap.height,
+      };
+      this.options.onCursorVisibilityChange?.(true);
+      this.log(`Cursor updated: ${bitmap.width}x${bitmap.height} hotspot=(${hotspotX},${hotspotY})`);
+      this.drawCursorOverlay();
+    } catch (err) {
+      this.log(`Cursor channel: failed to decode PNG: ${String(err)}`);
+    }
+  }
+
+  private drawCursorOverlay(): void {
+    const canvas = this.options.getCursorCanvas?.();
+    if (!canvas || !this.cursorState.visible || !this.cursorImageBitmap) return;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const parts = this.currentResolution.split("x");
+    const streamW = Number(parts[0]) || canvas.width;
+    const streamH = Number(parts[1]) || canvas.height;
+
+    const scaleX = canvas.width / streamW;
+    const scaleY = canvas.height / streamH;
+
+    const drawX = Math.round(this.localCursorX * scaleX - this.cursorState.hotspotX * scaleX);
+    const drawY = Math.round(this.localCursorY * scaleY - this.cursorState.hotspotY * scaleY);
+    const drawW = Math.round(this.cursorState.naturalWidth * scaleX);
+    const drawH = Math.round(this.cursorState.naturalHeight * scaleY);
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(this.cursorImageBitmap, drawX, drawY, Math.max(1, drawW), Math.max(1, drawH));
+  }
+
+  private clearCursorCanvas(): void {
+    const canvas = this.options.getCursorCanvas?.();
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    ctx?.clearRect(0, 0, canvas.width, canvas.height);
+  }
+
   private async onControlChannelMessage(data: string | Blob | ArrayBuffer): Promise<void> {
     let payloadText: string;
     if (typeof data === "string") {
@@ -1889,6 +2036,9 @@ export class GfnWebRtcClient {
     try {
       await this.requestPointerLockCompat(lockTarget, { unadjustedMovement: true });
       this.log("Pointer lock acquired with unadjustedMovement=true (raw/unaccelerated)");
+      const streamParts = this.currentResolution.split("x");
+      this.localCursorX = (Number(streamParts[0]) || 1920) / 2;
+      this.localCursorY = (Number(streamParts[1]) || 1080) / 2;
     } catch (err) {
       const domErr = err as DOMException;
       if (domErr?.name === "NotSupportedError") {
@@ -2208,6 +2358,13 @@ export class GfnWebRtcClient {
       this.pendingMouseDx += Math.round(adjustedDx);
       this.pendingMouseDy += Math.round(adjustedDy);
       this.pendingMouseTimestampUs = timestampUs(eventTimestampMs);
+
+      const streamParts = this.currentResolution.split("x");
+      const streamW = Number(streamParts[0]) || 1920;
+      const streamH = Number(streamParts[1]) || 1080;
+      this.localCursorX = Math.max(0, Math.min(streamW - 1, this.localCursorX + dx));
+      this.localCursorY = Math.max(0, Math.min(streamH - 1, this.localCursorY + dy));
+      this.drawCursorOverlay();
     };
 
     const onPointerMove = (event: PointerEvent) => {
@@ -2862,24 +3019,39 @@ export class GfnWebRtcClient {
     pc.ondatachannel = (event) => {
       const channel = event.channel;
       this.log(`Remote data channel received: label=${channel.label}, ordered=${channel.ordered}`);
-      if (channel.label !== "control_channel") {
-        return;
-      }
 
-      this.controlChannel = channel;
-      this.controlChannel.binaryType = "arraybuffer";
-      this.controlChannel.onmessage = (msgEvent) => {
-        void this.onControlChannelMessage(msgEvent.data as string | Blob | ArrayBuffer);
-      };
-      this.controlChannel.onclose = () => {
-        this.log("Control channel closed");
-        if (this.controlChannel === channel) {
-          this.controlChannel = null;
-        }
-      };
-      this.controlChannel.onerror = () => {
-        this.log("Control channel error");
-      };
+      if (channel.label === "control_channel") {
+        this.controlChannel = channel;
+        this.controlChannel.binaryType = "arraybuffer";
+        this.controlChannel.onmessage = (msgEvent) => {
+          void this.onControlChannelMessage(msgEvent.data as string | Blob | ArrayBuffer);
+        };
+        this.controlChannel.onclose = () => {
+          this.log("Control channel closed");
+          if (this.controlChannel === channel) {
+            this.controlChannel = null;
+          }
+        };
+        this.controlChannel.onerror = () => {
+          this.log("Control channel error");
+        };
+      } else if (channel.label === "cursor_channel") {
+        this.cursorChannel = channel;
+        this.cursorChannel.binaryType = "arraybuffer";
+        this.cursorChannel.onmessage = (msgEvent) => {
+          void this.onCursorChannelMessage(msgEvent.data as ArrayBuffer);
+        };
+        this.cursorChannel.onclose = () => {
+          this.log("Cursor channel closed");
+          if (this.cursorChannel === channel) {
+            this.cursorChannel = null;
+          }
+        };
+        this.cursorChannel.onerror = () => {
+          this.log("Cursor channel error");
+        };
+        this.log("Cursor channel open");
+      }
     };
 
     pc.onicecandidateerror = (event: Event) => {
