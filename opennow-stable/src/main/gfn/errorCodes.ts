@@ -114,6 +114,11 @@ export enum GfnErrorCode {
   GfnStorageNotAvailable = 3237093722, // statusCode 90
   SessionServerErrorEnd = 3237093887,
 
+  // Cursor channel errors
+  StreamCursorChannelError = 3237093897,
+  StreamerCursorChannelNotOpen = 3237093920,
+  ServerDisconnectedInvalidMouseState = 3237094150,
+
   // Session setup cancelled
   SessionSetupCancelled = 15867905,
   SessionSetupCancelledDuringQueuing = 15867906,
@@ -536,6 +541,11 @@ export const ERROR_MESSAGES: Map<number, ErrorMessageEntry> = new Map([
       description: "Service storage is not available.",
     },
   ],
+
+  // Cursor channel errors
+  [3237093897, { title: "Cursor Channel Error", description: "The cursor channel encountered an error." }],
+  [3237093920, { title: "Cursor Channel Not Open", description: "The cursor channel was not established." }],
+  [3237094150, { title: "Stream Disconnected", description: "The server disconnected due to an invalid mouse state." }],
 
   // Cancellation
   [

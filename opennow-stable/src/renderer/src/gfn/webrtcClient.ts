@@ -2511,6 +2511,8 @@ export class GfnWebRtcClient {
       if (!isPointerLockActive() && event.target !== videoElement) {
         return;
       }
+      // Flush any accumulated movement before the button event (protocol ordering)
+      flushMouse();
       event.preventDefault();
       const payload = this.inputEncoder.encodeMouseButtonDown({
         button: toMouseButton(event.button),
@@ -2530,6 +2532,8 @@ export class GfnWebRtcClient {
       if (!isPointerLockActive() && event.target !== videoElement) {
         return;
       }
+      // Flush any accumulated movement before the button event (protocol ordering)
+      flushMouse();
       event.preventDefault();
       const payload = this.inputEncoder.encodeMouseButtonUp({
         button: toMouseButton(event.button),
