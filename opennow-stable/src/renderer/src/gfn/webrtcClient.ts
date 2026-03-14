@@ -120,6 +120,16 @@ function mapTextCharToKeySpec(char: string): KeyStrokeSpec | null {
   return null;
 }
 
+function computeContainRect(
+  containerW: number, containerH: number,
+  contentW: number, contentH: number
+): { x: number; y: number; width: number; height: number } {
+  const scale = Math.min(containerW / contentW, containerH / contentH);
+  const w = contentW * scale;
+  const h = contentH * scale;
+  return { x: (containerW - w) / 2, y: (containerH - h) / 2, width: w, height: h };
+}
+
 function hevcPreferredProfileId(colorQuality: ColorQuality): 1 | 2 {
   // 10-bit modes should prefer HEVC Main10 profile-id=2.
   return colorQuality.startsWith("10bit") ? 2 : 1;
@@ -1871,6 +1881,7 @@ export class GfnWebRtcClient {
     try {
       const blob = new Blob([imageBytes], { type: "image/png" });
       const bitmap = await createImageBitmap(blob);
+      this.cursorImageBitmap?.close();
       this.cursorImageBitmap = bitmap;
       this.cursorState = {
         visible: true,
@@ -1899,11 +1910,12 @@ export class GfnWebRtcClient {
     const streamW = Number(parts[0]) || canvas.width;
     const streamH = Number(parts[1]) || canvas.height;
 
-    const scaleX = canvas.width / streamW;
-    const scaleY = canvas.height / streamH;
+    const rect = computeContainRect(canvas.width, canvas.height, streamW, streamH);
+    const scaleX = rect.width / streamW;
+    const scaleY = rect.height / streamH;
 
-    const drawX = Math.round(this.localCursorX * scaleX - this.cursorState.hotspotX * scaleX);
-    const drawY = Math.round(this.localCursorY * scaleY - this.cursorState.hotspotY * scaleY);
+    const drawX = Math.round(rect.x + this.localCursorX * scaleX - this.cursorState.hotspotX * scaleX);
+    const drawY = Math.round(rect.y + this.localCursorY * scaleY - this.cursorState.hotspotY * scaleY);
     const drawW = Math.round(this.cursorState.naturalWidth * scaleX);
     const drawH = Math.round(this.cursorState.naturalHeight * scaleY);
 
