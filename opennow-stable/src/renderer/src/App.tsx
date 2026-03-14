@@ -2105,6 +2105,7 @@ export function App(): JSX.Element {
               userAvatarUrl={authSession?.user.avatarUrl}
               remainingPlaytimeText={remainingPlaytimeText}
               playtimeData={playtime}
+              sessionElapsedSeconds={sessionElapsedSeconds}
               settings={{
                 resolution: settings.resolution,
                 fps: settings.fps,
@@ -2221,6 +2222,7 @@ export function App(): JSX.Element {
               userAvatarUrl={authSession?.user.avatarUrl}
               remainingPlaytimeText={remainingPlaytimeText}
               playtimeData={playtime}
+              sessionElapsedSeconds={sessionElapsedSeconds}
               settings={{
                 resolution: settings.resolution,
                 fps: settings.fps,
