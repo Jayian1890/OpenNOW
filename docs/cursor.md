@@ -192,16 +192,76 @@ event type field and BE for the remaining fields.
 
 ## 11. Timestamp Encoding
 
+### Web / Electron client (browser environment)
+
 All events (except heartbeat) carry a timestamp in microseconds derived from
-`performance.now() * 1000`. The official client's `_r()` function computes
-this value.
+`performance.now() * 1000`. The official GFN browser client's `_r()` function
+computes this value, and OpenNOW matches it exactly:
 
-The timestamp is written as an 8-byte (64-bit) unsigned integer. For most
-events (keyboard, mouse), this is **big-endian**. For gamepad packets, it is
-**little-endian** (see §10).
+```ts
+function writeTimestamp(view: DataView, offset: number): void {
+  const tsUs = performance.now() * 1000;
+  const lo = Math.floor(tsUs) & 0xFFFFFFFF;
+  const hi = Math.floor(tsUs / 4294967296);
+  view.setUint32(offset, hi, false);      // high 32 bits, big-endian
+  view.setUint32(offset + 4, lo, false);  // low 32 bits, big-endian
+}
+```
 
-In the v3+ outer wrapper, the timestamp is always **big-endian u64** written
-by `yc()`, split as two 32-bit halves: high word first, then low word.
+`performance.now()` is a monotonic clock that starts near zero when the page
+loads. Browsers intentionally add a small random offset to prevent timing-based
+fingerprinting, so the value does **not** correlate to wall-clock Unix time.
+
+For inner event payload timestamps (keyboard, mouse buttons, gamepad) a `BigInt`
+variant is used:
+
+```ts
+function timestampUs(sourceTimestampMs?: number): bigint {
+  const base =
+    typeof sourceTimestampMs === "number" ? sourceTimestampMs : performance.now();
+  return BigInt(Math.floor(base * 1000));
+}
+```
+
+### Native / Rust client (for reference)
+
+Native clients use a session-relative Unix epoch value: session start time
+(in Unix microseconds) plus the elapsed monotonic duration:
+
+```rust
+pub fn get_timestamp_us() -> u64 {
+    if let Some(ref t) = *SESSION_TIMING.read() {
+        let elapsed_us = t.start.elapsed().as_micros() as u64;
+        t.unix_us.wrapping_add(elapsed_us)
+    } else {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0)
+    }
+}
+```
+
+### Comparison
+
+| Client type | Timestamp source | Example value after 5s |
+|---|---|---|
+| Web / Electron | `performance.now() * 1000` | `~5_000_000 µs` |
+| Native / Rust | Unix epoch µs + session elapsed | `~1_710_000_005_000_000 µs` |
+
+These values are numerically very different, but the GFN server accepts both
+because it uses timestamps for **relative** ordering, coalescing interval checks
+(`MOUSE_FLUSH_FAST_MS = 4 ms`), and stale-packet detection on the partially
+reliable channel — not for absolute clock comparison between client and server.
+
+### Byte encoding
+
+The timestamp field is always 8 bytes (u64):
+
+- **Big-endian** for keyboard, mouse move, mouse button, mouse wheel events
+- **Little-endian** for gamepad events (see §10)
+- **Big-endian** in the v3+ outer wrapper (`0x23` frame), written as two 32-bit
+  halves (high word first) by `yc()`
 
 ---
 
