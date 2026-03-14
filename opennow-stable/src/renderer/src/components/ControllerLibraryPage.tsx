@@ -820,9 +820,10 @@ export function ControllerLibraryPage({
           const isActive = idx === selectedIndex;
           const record = playtimeData[game.id];
           const totalSecs = record?.totalSeconds ?? 0;
+          const liveTotalSecs = totalSecs + ((currentStreamingGame && currentStreamingGame.id === game.id) ? sessionElapsedSeconds : 0);
           const lastPlayedAt = record?.lastPlayedAt ?? null;
           const sessionCount = record?.sessionCount ?? 0;
-          const playtimeLabel = formatPlaytime(totalSecs);
+          const playtimeLabel = formatPlaytime(liveTotalSecs);
           const lastPlayedLabel = formatLastPlayed(lastPlayedAt);
           const genres = game.genres?.slice(0, 2) ?? [];
           const tierLabel = game.membershipTierLabel;
@@ -1013,7 +1014,7 @@ export function ControllerLibraryPage({
                     const totalSecs = record?.totalSeconds ?? 0;
                     const lastPlayed = record?.lastPlayedAt ?? null;
                     const sessionCount = record?.sessionCount ?? 0;
-                    const playtimeLabel = formatPlaytime(totalSecs);
+                    const playtimeLabel = formatPlaytime(totalSecs + (currentStreamingGame && currentStreamingGame.id === cs.id ? sessionElapsedSeconds : 0));
                     const lastPlayedLabel = formatLastPlayed(lastPlayed);
                     const genres = cs.genres?.slice(0, 2) ?? [];
                     const tier = cs.membershipTierLabel;
