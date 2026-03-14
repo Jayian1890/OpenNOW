@@ -21,15 +21,37 @@ packet in an outer timestamp frame (see §14).
 
 ## 2. Transport Channels
 
-Two WebRTC data channels carry input:
+Three WebRTC data channels carry input and cursor state:
 
-| Channel label | Ordered | Reliability | Used for |
-|---|---|---|---|
-| `input_channel_v1` | Yes | Reliable | Keyboard, mouse buttons, mouse wheel, heartbeat, gamepad (fallback) |
-| `input_channel_partially_reliable` | No | `maxPacketLifeTime` (default 300 ms) | Mouse move, gamepad |
+| Channel label | Ordered | Reliability | Direction | Used for |
+|---|---|---|---|---|
+| `input_channel_v1` | Yes | Reliable | Client → Server | Keyboard, mouse buttons, mouse wheel, heartbeat, gamepad (fallback) |
+| `input_channel_partially_reliable` | No | `maxPacketLifeTime` (default 300 ms) | Client → Server | Mouse move, gamepad |
+| `cursor_channel` | Yes | Reliable | Server → Client | Cursor visibility, cursor image data |
 
 The reliable channel also carries the **protocol version handshake** from the
 server (see §13).
+
+The `cursor_channel` is a server-to-client channel that sends cursor state
+updates from the cloud VM. See §17 for message format details.
+
+### 2a. Client-Side Capture Modes
+
+The browser/Electron client uses the **Pointer Lock API** (`requestPointerLock`)
+to capture mouse input. This differs from native implementations:
+
+| Feature | Native (Rust/winit) | Browser/Electron |
+|---|---|---|
+| Capture API | `CursorGrabMode::Confined` / `Locked` | Pointer Lock API |
+| Windows Raw Input | `RAWINPUTDEVICE` HID registration | Not available |
+| macOS Event Taps | `CGEventTapLocation::HIDEventTap` | Not available |
+| OS acceleration | Bypassed (hardware deltas) | Applied by OS before browser |
+| Latency | 10-30ms | 20-40ms (additional browser event loop) |
+
+**Limitation:** Browser environments cannot access hardware-level raw input.
+The Pointer Lock API provides `movementX/Y` which are pre-accelerated by the
+OS mouse settings. This is a fundamental web platform limitation that native
+addons (node-ffi, N-API) could potentially address in the future.
 
 ---
 
@@ -86,6 +108,27 @@ Total: **22 bytes** (raw payload before v3 wrapper).
 Mouse move events are sent on the **partially reliable** channel and are
 coalesced: multiple browser `pointermove`/`pointerrawupdate` events within
 one flush interval (4–16 ms) are summed into a single packet.
+
+### 5a. Pointer Capture Implementation
+
+The client uses `element.setPointerCapture()` and the Pointer Lock API to capture
+mouse input during streaming:
+
+```ts
+// Pointer capture for mouse button tracking across element boundaries
+element.setPointerCapture(event.pointerId);
+
+// Pointer lock for relative movement (no cursor bounds)
+element.requestPointerLock({ unadjustedMovement: true });
+```
+
+**Event flow:**
+1. `pointerrawupdate` (Chrome/Edge) → hardware-timed events, coalesced
+2. `pointermove` → standard pointer events with `movementX/Y`
+3. `mousemove` → fallback for older browsers
+
+**Coalesced events:** When available, `event.getCoalescedEvents()` returns
+all sub-frame movements that were merged into a single event.
 
 ---
 
@@ -394,3 +437,143 @@ Conversion: `gfnButton = browserButton + 1`.
 | 9 | `INPUT_MOUSE_BUTTON_UP` | Mouse button release |
 | 10 | `INPUT_MOUSE_WHEEL` | Mouse wheel scroll |
 | 12 | `INPUT_GAMEPAD` | Gamepad state |
+
+---
+
+## 18. Local Cursor State
+
+The client maintains local cursor position for rendering the cursor overlay
+during pointer lock (since the system cursor is hidden).
+
+```typescript
+interface LocalCursor {
+  x: number;              // 0 to streamWidth-1
+  y: number;              // 0 to streamHeight-1
+  visible: boolean;
+  imageDataUrl: string | null;
+  hotspotX: number;
+  hotspotY: number;
+  streamWidth: number;
+  streamHeight: number;
+}
+```
+
+**Update logic:**
+- Position updates on every mouse move event (relative deltas applied)
+- Bounds clamping to stream dimensions
+- Triggers `drawCursorOverlay()` to render on canvas
+
+This provides instant visual feedback while waiting for the server's
+cursor image updates via `cursor_channel` (§17).
+
+---
+
+## 19. Mouse Coalescing
+
+The client implements mouse movement coalescing to match GFN server
+expectations (250 Hz effective rate).
+
+```typescript
+interface MouseCoalescer {
+  accumulatedDx: number;
+  accumulatedDy: number;
+  lastSendUs: number;
+  coalesceIntervalUs: number;  // 4000 µs = 4ms
+}
+```
+
+**Accumulation:**
+- Browser events add to `accumulatedDx/Dy`
+- Flush timer (4ms interval) sends accumulated deltas
+- Resets accumulators after each send
+
+**Flush triggers:**
+1. Timer expiry (4ms interval)
+2. Before button events (to preserve event ordering)
+3. Pointer lock loss
+
+**Event ordering requirement:**
+Movement is flushed BEFORE button events to ensure correct click positioning:
+```
+MouseMove(100,200) → MouseButtonDown → MouseMove(50,50)
+```
+
+---
+
+## 17. Cursor Channel Messages (Server → Client)
+
+The `cursor_channel` carries cursor state updates from the GFN server to
+the client. Unlike input channels which carry client input to the server,
+this channel streams cursor images and visibility changes from the cloud
+VM back to the client for local rendering.
+
+### 17a. Message Format
+
+Messages are variable-length binary payloads:
+
+```
+[0]       Visibility flag: u8 (0 = hidden, non-zero = visible)
+[1-2]     Hotspot X: u16 (Little Endian) — horizontal offset from top-left
+[3-4]     Hotspot Y: u16 (Little Endian) — vertical offset from top-left
+[5...N]   PNG image data (when visible)
+```
+
+**Visibility flag:**
+- `0x00` — Cursor is hidden; client should hide the local cursor overlay
+- Any non-zero value — Cursor is visible; image data follows
+
+**Minimal message (visibility only):**
+When the message is 1 byte (`[0] = 0x01`), the server is indicating cursor
+visibility without providing image data. The client should show the default
+system cursor or retain the last image.
+
+**Full cursor update:**
+When the message is 5+ bytes (`[0] ≠ 0`), the payload includes:
+- Hotspot coordinates (where the click point is within the cursor image)
+- PNG-encoded cursor image following the hotspot fields
+
+### 17b. PNG Image Validation
+
+The client validates PNG magic bytes at the start of the image data:
+
+```
+0x89 0x50 0x4E 0x47 ... (standard PNG header)
+```
+
+Invalid formats are logged and ignored; the previous cursor image is retained.
+
+### 17c. Client Rendering
+
+Upon receiving a valid cursor update:
+
+1. Decode the PNG to an `ImageBitmap` (or `<img>` element)
+2. Update the local cursor state with dimensions and hotspot
+3. Call `onCursorVisibilityChange(true)` to notify the UI
+4. Draw the cursor at the locally-tracked position (see §18)
+
+When visibility flag is 0:
+
+1. Set cursor state to `visible: false`
+2. Call `onCursorVisibilityChange(false)`
+3. Clear the cursor overlay canvas
+
+### 17d. Channel Properties
+
+| Property | Value |
+|---|---|
+| Label | `cursor_channel` |
+| Ordered | Yes |
+| Reliable | Yes (no `maxPacketLifeTime`) |
+| Binary type | `arraybuffer` |
+| Direction | Server → Client only |
+
+The channel is created during WebRTC peer connection setup alongside the
+input channels:
+
+```ts
+this.cursorChannel = pc.createDataChannel("cursor_channel");
+this.cursorChannel.binaryType = "arraybuffer";
+this.cursorChannel.onmessage = (msg) => {
+  this.onCursorChannelMessage(msg.data);
+};
+```
