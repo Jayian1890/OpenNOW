@@ -63,6 +63,8 @@ interface StreamViewProps {
   remainingPlaytimeText: string;
   micTrack?: MediaStreamTrack | null;
   className?: string;
+  cursorCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
+  cursorOverlayVisible?: boolean;
 }
 
 function getRttColor(rttMs: number): string {
@@ -277,6 +279,8 @@ export function StreamView({
   micTrack,
   hideStreamButtons = false,
   className,
+  cursorCanvasRef,
+  cursorOverlayVisible = false,
 }: StreamViewProps): JSX.Element {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showHints, setShowHints] = useState(true);
@@ -949,6 +953,25 @@ export function StreamView({
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [captureScreenshot, handleToggleSideBar, isMacClient, shortcuts.screenshot, shortcuts.recording, toggleRecording]);
 
+  useEffect(() => {
+    const canvas = cursorCanvasRef?.current;
+    const videoEl = localVideoRef.current;
+    if (!canvas || !videoEl) return;
+
+    const syncSize = () => {
+      const { width, height } = videoEl.getBoundingClientRect();
+      if (width > 0 && height > 0) {
+        canvas.width = Math.round(width * (window.devicePixelRatio || 1));
+        canvas.height = Math.round(height * (window.devicePixelRatio || 1));
+      }
+    };
+
+    const ro = new ResizeObserver(syncSize);
+    ro.observe(videoEl);
+    syncSize();
+    return () => ro.disconnect();
+  }, [cursorCanvasRef]);
+
   return (
     <div className={["sv", className].filter(Boolean).join(" ")}>
       <video
@@ -963,6 +986,12 @@ export function StreamView({
             localVideoRef.current.focus();
           }
         }}
+      />
+      <canvas
+        ref={cursorCanvasRef}
+        className="sv-cursor-overlay"
+        style={{ display: cursorOverlayVisible ? "block" : "none" }}
+        aria-hidden="true"
       />
       <audio ref={setAudioRef} autoPlay playsInline />
 

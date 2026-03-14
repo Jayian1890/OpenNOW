@@ -7,6 +7,14 @@ export const INPUT_MOUSE_BUTTON_UP = 9;
 export const INPUT_MOUSE_WHEEL = 10;
 export const INPUT_GAMEPAD = 12;
 
+// Cursor type bitmask values (from GFN cursor_channel protocol)
+export const CURSOR_TYPE_NONE     = 0;
+export const CURSOR_TYPE_MOUSE    = 1;
+export const CURSOR_TYPE_KEYBOARD = 2;
+export const CURSOR_TYPE_GAMEPAD  = 4;
+export const CURSOR_TYPE_TOUCH    = 8;
+export const CURSOR_TYPE_ALL      = 15;
+
 // Mouse button constants (1-based for GFN protocol)
 // GFN uses: 1=Left, 2=Middle, 3=Right, 4=Back, 5=Forward
 export const MOUSE_LEFT = 1;

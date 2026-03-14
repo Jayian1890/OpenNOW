@@ -604,6 +604,8 @@ export function App(): JSX.Element {
   // Refs
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const cursorCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [cursorVisible, setCursorVisible] = useState(false);
   const clientRef = useRef<GfnWebRtcClient | null>(null);
   const sessionRef = useRef<SessionInfo | null>(null);
   const hasInitializedRef = useRef(false);
@@ -1162,6 +1164,8 @@ export function App(): JSX.Element {
               onMicStateChange: (state) => {
                 console.log(`[App] Mic state: ${state.state}${state.deviceLabel ? ` (${state.deviceLabel})` : ""}`);
               },
+              getCursorCanvas: () => cursorCanvasRef.current,
+              onCursorVisibilityChange: (visible) => setCursorVisible(visible),
             });
             // Auto-start microphone if mode is enabled
             if (settings.microphoneMode !== "disabled") {
@@ -1684,6 +1688,7 @@ export function App(): JSX.Element {
       clientRef.current?.dispose();
       clientRef.current = null;
       setNavbarActiveSession(null);
+      setCursorVisible(false);
       if (streamingGame) endPlaytimeSession(streamingGame.id);
       resetLaunchRuntime();
       void refreshNavbarActiveSession();
@@ -2050,6 +2055,8 @@ export function App(): JSX.Element {
             onReleasePointerLock={() => {
               void releasePointerLockIfNeeded();
             }}
+            cursorCanvasRef={cursorCanvasRef}
+            cursorOverlayVisible={cursorVisible && streamStatus === "streaming"}
           />
         )}
         {isSwitchingGame && (
