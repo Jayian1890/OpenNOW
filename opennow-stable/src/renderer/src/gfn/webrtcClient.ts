@@ -3259,7 +3259,6 @@ export class GfnWebRtcClient {
 
   async handleOffer(offerSdp: string, session: SessionInfo, settings: OfferSettings): Promise<void> {
     this.cleanupPeerConnection();
-
     this.log("=== handleOffer START ===");
     this.log(`Session: id=${session.sessionId}, status=${session.status}, serverIp=${session.serverIp}`);
     this.log(`Signaling: server=${session.signalingServer}, url=${session.signalingUrl}`);
@@ -3267,6 +3266,9 @@ export class GfnWebRtcClient {
     this.log(
       `Settings: codec=${settings.codec}, colorQuality=${settings.colorQuality}, resolution=${settings.resolution}, fps=${settings.fps}, maxBitrate=${settings.maxBitrateKbps}kbps`,
     );
+    if (session.negotiatedStreamProfile) {
+      this.log(`Negotiated stream profile override: ${JSON.stringify(session.negotiatedStreamProfile)}`);
+    }
     this.log(`ICE servers: ${session.iceServers.length} (${session.iceServers.map(s => s.urls.join(",")).join(" | ")})`);
     this.log(`Offer SDP length: ${offerSdp.length} chars`);
     // Log full offer SDP for ICE debugging
@@ -3540,30 +3542,10 @@ export class GfnWebRtcClient {
     const credentials = extractIceCredentials(finalSdp);
     this.log(`Extracted ICE credentials: ufrag=${credentials.ufrag}, pwd=${credentials.pwd.slice(0, 8)}...`);
     const { width, height } = parseResolution(settings.resolution);
-    const viewportRect = this.options.videoElement.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    const baseCssViewportWidth = Math.max(viewportRect.width, window.innerWidth || 0);
-    const baseCssViewportHeight = Math.max(viewportRect.height, window.innerHeight || 0);
-    const screenCssWidth = window.screen?.width ?? baseCssViewportWidth;
-    const screenCssHeight = window.screen?.height ?? baseCssViewportHeight;
-    const shouldUseScreenViewportHint = dpr > 1 && (width >= 3840 || height >= 2160);
-    const resolvedCssViewportWidth = shouldUseScreenViewportHint
-      ? Math.max(baseCssViewportWidth, screenCssWidth)
-      : baseCssViewportWidth;
-    const resolvedCssViewportHeight = shouldUseScreenViewportHint
-      ? Math.max(baseCssViewportHeight, screenCssHeight)
-      : baseCssViewportHeight;
-    const clientViewportWidth = Math.max(1, Math.round(resolvedCssViewportWidth * dpr));
-    const clientViewportHeight = Math.max(1, Math.round(resolvedCssViewportHeight * dpr));
-    this.log(
-      `Client viewport for NVST: ${clientViewportWidth}x${clientViewportHeight} (CSS base ${Math.round(baseCssViewportWidth)}x${Math.round(baseCssViewportHeight)}, screen ${Math.round(screenCssWidth)}x${Math.round(screenCssHeight)}, mode=${shouldUseScreenViewportHint ? "screen-hidpi-4k" : "window"} @ DPR ${dpr.toFixed(2)})`,
-    );
 
     const nvstSdp = buildNvstSdp({
       width,
       height,
-      clientViewportWidth,
-      clientViewportHeight,
       fps: settings.fps,
       maxBitrateKbps: settings.maxBitrateKbps,
       partialReliableThresholdMs: this.partialReliableThresholdMs,

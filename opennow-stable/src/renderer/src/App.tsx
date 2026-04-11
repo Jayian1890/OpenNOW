@@ -9,11 +9,25 @@ import type {
   GameVariant,
   LoginProvider,
   MainToRendererSignalingEvent,
+  SessionAdAction,
+  SessionAdInfo,
+  SessionAdState,
   SessionInfo,
   Settings,
   SubscriptionInfo,
   StreamRegion,
   VideoCodec,
+} from "@shared/gfn";
+import {
+  DEFAULT_KEYBOARD_LAYOUT,
+  getDefaultStreamPreferences,
+  USER_FACING_VIDEO_CODEC_OPTIONS,
+  getPreferredSessionAdMediaUrl,
+  getSessionAdDurationMs,
+  getSessionAdItems,
+  getSessionAdOpportunity,
+  isSessionAdsRequired,
+  isSessionQueuePaused,
 } from "@shared/gfn";
 
 import {
@@ -23,8 +37,10 @@ import {
 } from "./gfn/webrtcClient";
 import { formatShortcutForDisplay, isShortcutMatch, normalizeShortcut } from "./shortcuts";
 import { useControllerNavigation } from "./controllerNavigation";
+import { useElapsedSeconds } from "./utils/useElapsedSeconds";
 import { usePlaytime } from "./utils/usePlaytime";
 import { createStreamDiagnosticsStore } from "./utils/streamDiagnosticsStore";
+import { loadStoredCodecResults, saveStoredCodecResults, testCodecSupport, type CodecTestResult } from "./lib/codecDiagnostics";
 
 // UI Components
 import { LoginScreen } from "./components/LoginScreen";
@@ -35,9 +51,11 @@ import { ControllerLibraryPage } from "./components/ControllerLibraryPage";
 import { SettingsPage } from "./components/SettingsPage";
 import { StreamLoading } from "./components/StreamLoading";
 import { ControllerStreamLoading } from "./components/ControllerStreamLoading";
+import type { QueueAdPlaybackEvent, QueueAdPreviewHandle } from "./components/QueueAdPreview";
 import { StreamView } from "./components/StreamView";
 
-const codecOptions: VideoCodec[] = ["H264", "H265", "AV1"];
+const codecOptions: VideoCodec[] = [...USER_FACING_VIDEO_CODEC_OPTIONS];
+const DEFAULT_STREAM_PREFERENCES = getDefaultStreamPreferences();
 const allResolutionOptions = ["1280x720", "1280x800", "1440x900", "1680x1050", "1920x1080", "1920x1200", "2560x1080", "2560x1440", "2560x1600", "3440x1440", "3840x2160", "3840x2400"];
 const fpsOptions = [30, 60, 120, 144, 240];
 const aspectRatioOptions = ["16:9", "16:10", "21:9", "32:9"] as const;
@@ -63,9 +81,19 @@ const getResolutionsByAspectRatio = (aspectRatio: string): string[] => {
 };
 const resolutionOptions = getResolutionsByAspectRatio("16:9");
 const SESSION_READY_POLL_INTERVAL_MS = 2000;
+const SESSION_AD_POLL_INTERVAL_MS = 30000;
+const SESSION_AD_PROGRESS_CHECK_INTERVAL_MS = 1000;
+const SESSION_AD_START_TIMEOUT_MS = 30000;
+const SESSION_AD_FORCE_PLAY_TIMEOUT_MS = 10000;
+const SESSION_AD_STUCK_TIMEOUT_MS = 30000;
 const SESSION_READY_TIMEOUT_MS = 180000;
 const VARIANT_SELECTION_LOCALSTORAGE_KEY = "opennow.variantByGameId";
 const PLAYTIME_RESYNC_INTERVAL_MS = 5 * 60 * 1000;
+const FREE_TIER_SESSION_LIMIT_SECONDS = 60 * 60;
+const FREE_TIER_30_MIN_WARNING_SECONDS = 30 * 60;
+const FREE_TIER_15_MIN_WARNING_SECONDS = 15 * 60;
+const FREE_TIER_FINAL_MINUTE_WARNING_SECONDS = 60;
+const STREAM_WARNING_VISIBILITY_MS = 15 * 1000;
 
 type GameSource = "main" | "library" | "public";
 type AppPage = "home" | "library" | "settings";
@@ -78,11 +106,25 @@ type StreamWarningState = {
   tone: "warn" | "critical";
   secondsLeft?: number;
 };
+type LocalSessionTimerWarningState = {
+  stage: "free-tier-30m" | "free-tier-15m" | "free-tier-final-minute";
+  shownAtMs: number;
+};
 type LaunchErrorState = {
   stage: StreamLoadingStatus;
   title: string;
   description: string;
   codeLabel?: string;
+};
+type QueueAdCancelReason = "error" | "other";
+type QueueAdErrorInfo = "Ad play timeout" | "Ad video is stuck" | "Error loading url";
+type QueueAdMetrics = {
+  startedAtMs: number | null;
+  wasPausedAtLeastOnce: boolean;
+};
+type QueueAdReportOptions = {
+  cancelReason?: QueueAdCancelReason;
+  errorInfo?: QueueAdErrorInfo;
 };
 
 const APP_PAGE_ORDER: AppPage[] = ["home", "library", "settings"];
@@ -98,6 +140,7 @@ const DEFAULT_SHORTCUTS = {
   shortcutScreenshot: "F11",
   shortcutToggleRecording: "F12",
 } as const;
+
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -282,6 +325,224 @@ function formatRemainingPlaytimeFromSubscription(
   return `${minutes}m`;
 }
 
+function normalizeMembershipTier(tier: string | null | undefined): string | null {
+  if (!tier) {
+    return null;
+  }
+  const normalized = tier.trim().toUpperCase();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function shouldShowQueueAdsForMembership(
+  subscription: SubscriptionInfo | null,
+  authSession: AuthSession | null,
+): boolean {
+  const effectiveTier = normalizeMembershipTier(subscription?.membershipTier ?? authSession?.user.membershipTier);
+  return effectiveTier === null || effectiveTier === "FREE";
+}
+
+function shouldShowFreeTierSessionWarnings(subscription: SubscriptionInfo | null): boolean {
+  return normalizeMembershipTier(subscription?.membershipTier) === "FREE";
+}
+
+function hasCrossedWarningThreshold(
+  previousSeconds: number | null,
+  currentSeconds: number,
+  thresholdSeconds: number,
+): boolean {
+  if (previousSeconds === null) {
+    return currentSeconds === thresholdSeconds;
+  }
+  return previousSeconds > thresholdSeconds && currentSeconds <= thresholdSeconds;
+}
+
+function getLocalSessionTimerWarning(
+  stage: LocalSessionTimerWarningState["stage"],
+  secondsLeft: number,
+): StreamWarningState {
+  if (stage === "free-tier-30m") {
+    return {
+      code: 1,
+      message: "30 minutes remaining in this free-tier session",
+      tone: "warn",
+    };
+  }
+
+  if (stage === "free-tier-15m") {
+    return {
+      code: 1,
+      message: "15 minutes remaining in this free-tier session",
+      tone: "warn",
+    };
+  }
+
+  return {
+    code: 1,
+    message: "This free-tier session ends soon",
+    tone: "critical",
+    secondsLeft: Math.max(0, secondsLeft),
+  };
+}
+
+function shouldUseQueueAdPolling(session: SessionInfo, subscription: SubscriptionInfo | null, authSession: AuthSession | null): boolean {
+  return (
+    shouldShowQueueAdsForMembership(subscription, authSession) &&
+    isSessionInQueue(session) &&
+    isSessionAdsRequired(session.adState)
+  );
+}
+
+function getEffectiveAdState(
+  session: SessionInfo | null,
+  subscription: SubscriptionInfo | null,
+  authSession: AuthSession | null,
+): SessionAdState | undefined {
+  if (!session) {
+    return undefined;
+  }
+
+  if (session.adState) {
+    return session.adState;
+  }
+
+  if ((session.status === 1 || session.status === 2 || session.status === 3) && session.queuePosition !== undefined) {
+    return {
+      isAdsRequired: true,
+      sessionAdsRequired: true,
+      message: "Free-tier queue ads begin as soon as you enter queue.",
+      opportunity: {
+        message: "Free-tier queue ads begin as soon as you enter queue.",
+      },
+      sessionAds: [],
+      ads: [],
+      serverSentEmptyAds: true,
+    };
+  }
+
+  if (!shouldShowQueueAdsForMembership(subscription, authSession)) {
+    return undefined;
+  }
+
+  if (!isSessionInQueue(session)) {
+    return undefined;
+  }
+
+  return {
+    isAdsRequired: true,
+    sessionAdsRequired: true,
+    message: "Free-tier queue ads begin as soon as you enter queue.",
+    opportunity: {
+      message: "Free-tier queue ads begin as soon as you enter queue.",
+    },
+    sessionAds: [
+      {
+        adId: "queue-ad-placeholder",
+        title: "Advertisement in progress",
+        description: "Ad media will appear here as soon as it is available.",
+      },
+    ],
+    ads: [
+      {
+        adId: "queue-ad-placeholder",
+        title: "Advertisement in progress",
+        description: "Ad media will appear here as soon as it is available.",
+      },
+    ],
+  };
+}
+
+function mergeAdState(
+  previous: SessionAdState | undefined,
+  next: SessionAdState | undefined,
+): SessionAdState | undefined {
+  if (!next) {
+    return previous;
+  }
+  // Server only populates sessionAds in the first poll after session creation.
+  // Later polls return sessionAdsRequired=true but sessionAds=null (serverSentEmptyAds=true),
+  // which produces an empty ads array. Preserve the ad list from the most recent poll that
+  // had URLs so the ad player can continue.
+  // Do NOT restore when serverSentEmptyAds is false — that signals an explicit client-side
+  // clear after a rejected finish action, and we must NOT bring the stale ad back.
+  if (
+    isSessionAdsRequired(next) &&
+    next.serverSentEmptyAds === true &&
+    getSessionAdItems(next).length === 0 &&
+    previous?.sessionAds &&
+    previous.sessionAds.length > 0
+  ) {
+    return { ...next, sessionAds: previous.sessionAds, ads: previous.ads };
+  }
+  return next;
+}
+
+function mergePolledSessionState(previous: SessionInfo, next: SessionInfo): SessionInfo {
+  if (isSessionReadyForConnect(next.status)) {
+    return next;
+  }
+
+  return {
+    ...next,
+    adState: mergeAdState(previous.adState, next.adState),
+    mediaConnectionInfo: next.mediaConnectionInfo ?? previous.mediaConnectionInfo,
+  };
+}
+
+function getNextAdReportAction(
+  lastAction: SessionAdAction | undefined,
+  playbackEvent: "playing" | "paused" | "ended",
+): SessionAdAction | null {
+  switch (playbackEvent) {
+    case "playing":
+      if (!lastAction) {
+        return "start";
+      }
+      return lastAction === "pause" ? "resume" : null;
+    case "paused":
+      return lastAction === "start" || lastAction === "resume" ? "pause" : null;
+    case "ended":
+      return lastAction === "finish" || lastAction === "cancel" ? null : "finish";
+    default:
+      return null;
+  }
+}
+
+function getActiveQueueAd(
+  adState: SessionAdState | undefined,
+  activeAdId: string | null,
+): SessionAdInfo | undefined {
+  const ads = getSessionAdItems(adState);
+  if (!ads.length) {
+    return undefined;
+  }
+
+  if (activeAdId) {
+    const matched = ads.find((ad) => ad.adId === activeAdId);
+    if (matched) {
+      return matched;
+    }
+  }
+
+  return ads[0];
+}
+
+function getNextQueueAd(
+  adState: SessionAdState | undefined,
+  activeAdId: string,
+): SessionAdInfo | undefined {
+  const ads = getSessionAdItems(adState);
+  if (!ads.length) {
+    return undefined;
+  }
+
+  const currentIndex = ads.findIndex((ad) => ad.adId === activeAdId);
+  if (currentIndex < 0) {
+    return ads[0];
+  }
+
+  return ads[currentIndex + 1];
+}
+
 function toLoadingStatus(status: StreamStatus): StreamLoadingStatus {
   switch (status) {
     case "queue":
@@ -398,8 +659,10 @@ export function App(): JSX.Element {
     aspectRatio: "16:9",
     fps: 60,
     maxBitrateMbps: 75,
-    codec: "H264",
-    colorQuality: "8bit_420",
+    codec: DEFAULT_STREAM_PREFERENCES.codec,
+    decoderPreference: "auto",
+    encoderPreference: "auto",
+    colorQuality: DEFAULT_STREAM_PREFERENCES.colorQuality,
     region: "",
     clipboardPaste: false,
     mouseSensitivity: 1,
@@ -414,20 +677,25 @@ export function App(): JSX.Element {
     microphoneMode: "disabled",
     microphoneDeviceId: "",
     hideStreamButtons: false,
+    showStatsOnLaunch: false,
     controllerMode: false,
     controllerUiSounds: false,
     controllerBackgroundAnimations: false,
     autoLoadControllerLibrary: false,
     autoFullScreen: false,
     favoriteGameIds: [],
+    sessionCounterEnabled: false,
     sessionClockShowEveryMinutes: 60,
     sessionClockShowDurationSeconds: 30,
     windowWidth: 1400,
     windowHeight: 900,
+    keyboardLayout: DEFAULT_KEYBOARD_LAYOUT,
     gameLanguage: "en_US",
     enableL4S: false,
   });
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [codecResults, setCodecResults] = useState<CodecTestResult[] | null>(() => loadStoredCodecResults());
+  const [codecTesting, setCodecTesting] = useState(false);
   const [regions, setRegions] = useState<StreamRegion[]>([]);
   const [subscriptionInfo, setSubscriptionInfo] = useState<SubscriptionInfo | null>(null);
   const diagnosticsStoreRef = useRef<ReturnType<typeof createStreamDiagnosticsStore> | null>(null);
@@ -437,7 +705,7 @@ export function App(): JSX.Element {
   // Stream State
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [streamStatus, setStreamStatus] = useState<StreamStatus>("idle");
-  const [showStatsOverlay, setShowStatsOverlay] = useState(true);
+  const [showStatsOverlay, setShowStatsOverlay] = useState(false);
   const [antiAfkEnabled, setAntiAfkEnabled] = useState(false);
   const [escHoldReleaseIndicator, setEscHoldReleaseIndicator] = useState<{ visible: boolean; progress: number }>({
     visible: false,
@@ -451,12 +719,66 @@ export function App(): JSX.Element {
   const [isResumingNavbarSession, setIsResumingNavbarSession] = useState(false);
   const [launchError, setLaunchError] = useState<LaunchErrorState | null>(null);
   const [sessionStartedAtMs, setSessionStartedAtMs] = useState<number | null>(null);
-  const [sessionElapsedSeconds, setSessionElapsedSeconds] = useState(0);
-  const [streamWarning, setStreamWarning] = useState<StreamWarningState | null>(null);
+  const [remoteStreamWarning, setRemoteStreamWarning] = useState<StreamWarningState | null>(null);
+  const [localSessionTimerWarning, setLocalSessionTimerWarning] = useState<LocalSessionTimerWarningState | null>(null);
+  const [activeQueueAdId, setActiveQueueAdId] = useState<string | null>(null);
+  const previousFreeTierRemainingSecondsRef = useRef<number | null>(null);
 
   const { playtime, startSession: startPlaytimeSession, endSession: endPlaytimeSession } = usePlaytime();
+  const sessionElapsedSeconds = useElapsedSeconds(sessionStartedAtMs, streamStatus === "streaming");
+  const isStreaming = streamStatus === "streaming";
+  const freeTierSessionWarningsActive =
+    isStreaming && sessionStartedAtMs !== null && shouldShowFreeTierSessionWarnings(subscriptionInfo);
+  const freeTierSessionRemainingSeconds = freeTierSessionWarningsActive
+    ? Math.max(0, FREE_TIER_SESSION_LIMIT_SECONDS - sessionElapsedSeconds)
+    : null;
+  const visibleLocalSessionTimerWarning = useMemo(() => {
+    if (localSessionTimerWarning === null || freeTierSessionRemainingSeconds === null) {
+      return null;
+    }
+
+    return getLocalSessionTimerWarning(localSessionTimerWarning.stage, freeTierSessionRemainingSeconds);
+  }, [freeTierSessionRemainingSeconds, localSessionTimerWarning]);
+  const streamWarning = useMemo(() => {
+    if (visibleLocalSessionTimerWarning?.tone === "critical") {
+      return visibleLocalSessionTimerWarning;
+    }
+    return remoteStreamWarning ?? visibleLocalSessionTimerWarning;
+  }, [remoteStreamWarning, visibleLocalSessionTimerWarning]);
 
   const controllerOverlayOpenRef = useRef(false);
+  const codecTestPromiseRef = useRef<Promise<CodecTestResult[] | null> | null>(null);
+  const codecStartupTestAttemptedRef = useRef(false);
+
+  const resetStatsOverlayToPreference = useCallback((): void => {
+    setShowStatsOverlay(settings.showStatsOnLaunch);
+  }, [settings.showStatsOnLaunch]);
+
+  const runCodecTest = useCallback(async (): Promise<void> => {
+    if (codecTestPromiseRef.current) {
+      await codecTestPromiseRef.current;
+      return;
+    }
+
+    const testPromise = (async (): Promise<CodecTestResult[] | null> => {
+      setCodecTesting(true);
+      try {
+        const results = await testCodecSupport();
+        setCodecResults(results);
+        saveStoredCodecResults(results);
+        return results;
+      } catch (error) {
+        console.error("Codec test failed:", error);
+        return null;
+      } finally {
+        setCodecTesting(false);
+        codecTestPromiseRef.current = null;
+      }
+    })();
+
+    codecTestPromiseRef.current = testPromise;
+    await testPromise;
+  }, []);
 
   const handleControllerPageNavigate = useCallback((direction: "prev" | "next"): void => {
     if (controllerOverlayOpenRef.current) {
@@ -653,6 +975,22 @@ export function App(): JSX.Element {
   const launchAbortRef = useRef(false);
   const streamStatusRef = useRef<StreamStatus>(streamStatus);
   const exitPromptResolverRef = useRef<((confirmed: boolean) => void) | null>(null);
+  const adReportQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const adReportStateRef = useRef<Record<string, SessionAdAction>>({});
+  const adMetricsRef = useRef<Record<string, QueueAdMetrics>>({});
+  const adMediaUrlCacheRef = useRef<Record<string, string>>({});
+  const queueAdPlaybackRef = useRef<{ adId: string; phase: "playing" | "finishing" } | null>(null);
+  const queueAdPreviewRef = useRef<QueueAdPreviewHandle | null>(null);
+  const activeQueueAdIdRef = useRef<string | null>(null);
+  const adForcePlayTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const adStartTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const adProgressIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const adLastProgressTsRef = useRef<number | null>(null);
+  // Stable ref so timer callbacks can call the latest reportQueueAdAction without
+  // capturing a stale closure (auth state can change between scheduling and firing).
+  const reportQueueAdActionRef = useRef<
+    (adId: string, action: SessionAdAction, options?: QueueAdReportOptions) => void
+  >(() => {});
 
   useEffect(() => {
     controllerOverlayOpenRef.current = controllerOverlayOpen;
@@ -697,6 +1035,159 @@ export function App(): JSX.Element {
     setVariantByGameId((prev) => mergeVariantSelections(prev, catalog));
   }, []);
 
+  const clearQueueAdStartWatchdogs = useCallback((): void => {
+    if (adForcePlayTimeoutRef.current) {
+      clearTimeout(adForcePlayTimeoutRef.current);
+      adForcePlayTimeoutRef.current = null;
+    }
+    if (adStartTimeoutRef.current) {
+      clearTimeout(adStartTimeoutRef.current);
+      adStartTimeoutRef.current = null;
+    }
+  }, []);
+
+  const clearQueueAdProgressWatchdog = useCallback((): void => {
+    if (adProgressIntervalRef.current) {
+      clearInterval(adProgressIntervalRef.current);
+      adProgressIntervalRef.current = null;
+    }
+    adLastProgressTsRef.current = null;
+  }, []);
+
+  const clearQueueAdWatchdogs = useCallback((): void => {
+    clearQueueAdStartWatchdogs();
+    clearQueueAdProgressWatchdog();
+  }, [clearQueueAdProgressWatchdog, clearQueueAdStartWatchdogs]);
+
+  const resetQueueAdMetrics = useCallback((adId: string): void => {
+    adMetricsRef.current[adId] = {
+      startedAtMs: null,
+      wasPausedAtLeastOnce: false,
+    };
+  }, []);
+
+  const markQueueAdStarted = useCallback((adId: string): void => {
+    const current = adMetricsRef.current[adId];
+    adMetricsRef.current[adId] = {
+      startedAtMs: current?.startedAtMs ?? Date.now(),
+      wasPausedAtLeastOnce: current?.wasPausedAtLeastOnce ?? false,
+    };
+  }, []);
+
+  const markQueueAdPaused = useCallback((adId: string): void => {
+    const current = adMetricsRef.current[adId];
+    adMetricsRef.current[adId] = {
+      startedAtMs: current?.startedAtMs ?? null,
+      wasPausedAtLeastOnce: true,
+    };
+  }, []);
+
+  const clearQueueAdMetrics = useCallback((adId: string): void => {
+    delete adMetricsRef.current[adId];
+  }, []);
+
+  const getQueueAdReportPayload = useCallback((adId: string, action: SessionAdAction, options?: QueueAdReportOptions) => {
+    const ad = getSessionAdItems(sessionRef.current?.adState).find((candidate) => candidate.adId === adId);
+    const adLengthMs = getSessionAdDurationMs(ad);
+    const snapshot = queueAdPreviewRef.current?.getSnapshot();
+    const watchedTimeInMs =
+      action === "finish" || action === "cancel"
+        ? Math.max(0, Math.round((snapshot?.currentTime ?? 0) * 1000))
+        : undefined;
+
+    const metrics = adMetricsRef.current[adId];
+    let pausedTimeInMs = 0;
+    if (
+      metrics?.startedAtMs &&
+      metrics.wasPausedAtLeastOnce &&
+      typeof adLengthMs === "number" &&
+      Number.isFinite(adLengthMs) &&
+      adLengthMs > 0
+    ) {
+      const elapsedMs = Date.now() - metrics.startedAtMs;
+      if (elapsedMs > adLengthMs) {
+        pausedTimeInMs = Math.round(elapsedMs - adLengthMs);
+      }
+    }
+
+    return {
+      watchedTimeInMs,
+      pausedTimeInMs,
+      cancelReason: action === "cancel" ? options?.cancelReason : undefined,
+      errorInfo: action === "cancel" ? options?.errorInfo : undefined,
+    };
+  }, []);
+
+  const armQueueAdStartWatchdogs = useCallback((adId: string): void => {
+    clearQueueAdStartWatchdogs();
+    adLastProgressTsRef.current = Date.now();
+
+    adForcePlayTimeoutRef.current = window.setTimeout(() => {
+      if (activeQueueAdIdRef.current !== adId) {
+        return;
+      }
+      const lastAction = adReportStateRef.current[adId];
+      if (lastAction === "start" || lastAction === "resume" || lastAction === "finish" || lastAction === "cancel") {
+        return;
+      }
+      void queueAdPreviewRef.current?.attemptPlayback();
+    }, SESSION_AD_FORCE_PLAY_TIMEOUT_MS);
+
+    adStartTimeoutRef.current = window.setTimeout(() => {
+      if (activeQueueAdIdRef.current !== adId) {
+        return;
+      }
+      const lastAction = adReportStateRef.current[adId];
+      if (lastAction === "start" || lastAction === "resume" || lastAction === "finish" || lastAction === "cancel") {
+        return;
+      }
+
+      clearQueueAdWatchdogs();
+      queueAdPlaybackRef.current = null;
+      adReportStateRef.current[adId] = "cancel";
+      reportQueueAdActionRef.current(adId, "cancel", {
+        cancelReason: "error",
+        errorInfo: "Ad play timeout",
+      });
+    }, SESSION_AD_START_TIMEOUT_MS);
+  }, [clearQueueAdStartWatchdogs, clearQueueAdWatchdogs]);
+
+  const ensureQueueAdProgressWatchdog = useCallback((adId: string): void => {
+    adLastProgressTsRef.current = Date.now();
+    if (adProgressIntervalRef.current) {
+      return;
+    }
+
+    adProgressIntervalRef.current = window.setInterval(() => {
+      if (activeQueueAdIdRef.current !== adId) {
+        return;
+      }
+
+      const lastAction = adReportStateRef.current[adId];
+      if (lastAction !== "start" && lastAction !== "resume") {
+        return;
+      }
+
+      const snapshot = queueAdPreviewRef.current?.getSnapshot();
+      if (!snapshot || snapshot.paused || snapshot.ended || isSessionQueuePaused(sessionRef.current?.adState)) {
+        return;
+      }
+
+      const lastProgressTs = adLastProgressTsRef.current;
+      if (!lastProgressTs || Date.now() - lastProgressTs < SESSION_AD_STUCK_TIMEOUT_MS) {
+        return;
+      }
+
+      clearQueueAdWatchdogs();
+      queueAdPlaybackRef.current = null;
+      adReportStateRef.current[adId] = "cancel";
+      reportQueueAdActionRef.current(adId, "cancel", {
+        cancelReason: "error",
+        errorInfo: "Ad video is stuck",
+      });
+    }, SESSION_AD_PROGRESS_CHECK_INTERVAL_MS);
+  }, [clearQueueAdWatchdogs]);
+
   const resetLaunchRuntime = useCallback((options?: {
     keepLaunchError?: boolean;
     keepStreamingContext?: boolean;
@@ -705,9 +1196,10 @@ export function App(): JSX.Element {
     setStreamStatus("idle");
     setQueuePosition(undefined);
     setSessionStartedAtMs(null);
-    setSessionElapsedSeconds(0);
-    setStreamWarning(null);
+    setRemoteStreamWarning(null);
+    setLocalSessionTimerWarning(null);
     setEscHoldReleaseIndicator({ visible: false, progress: 0 });
+    resetStatsOverlayToPreference();
     diagnosticsStore.set(defaultDiagnostics());
 
     if (!options?.keepStreamingContext) {
@@ -718,12 +1210,23 @@ export function App(): JSX.Element {
     if (!options?.keepLaunchError) {
       setLaunchError(null);
     }
-  }, [diagnosticsStore]);
+  }, [diagnosticsStore, resetStatsOverlayToPreference]);
 
   // Session ref sync
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
+
+  useEffect(() => {
+    adReportStateRef.current = {};
+    adMetricsRef.current = {};
+    adReportQueueRef.current = Promise.resolve();
+    adMediaUrlCacheRef.current = {};
+    queueAdPlaybackRef.current = null;
+    activeQueueAdIdRef.current = null;
+    setActiveQueueAdId(null);
+    clearQueueAdWatchdogs();
+  }, [clearQueueAdWatchdogs, session?.sessionId]);
 
   // Keep a ref copy of `streamStatus` so async callbacks can observe latest value
   useEffect(() => {
@@ -796,8 +1299,207 @@ export function App(): JSX.Element {
   }, [providers, providerIdpId, authSession]);
 
   const effectiveStreamingBaseUrl = useMemo(() => {
+    if (settings.region.trim()) {
+      return settings.region;
+    }
     return selectedProvider?.streamingServiceUrl ?? "";
-  }, [selectedProvider]);
+  }, [selectedProvider, settings.region]);
+
+  const reportQueueAdAction = useCallback((adId: string, action: SessionAdAction, options?: QueueAdReportOptions): void => {
+    const currentSession = sessionRef.current;
+    if (!currentSession) {
+      return;
+    }
+
+    const reportPayload = getQueueAdReportPayload(adId, action, options);
+
+    const request = {
+      token: authSession?.tokens.idToken ?? authSession?.tokens.accessToken ?? undefined,
+      streamingBaseUrl: currentSession.streamingBaseUrl ?? effectiveStreamingBaseUrl,
+      serverIp: currentSession.serverIp,
+      zone: currentSession.zone,
+      sessionId: currentSession.sessionId,
+      clientId: currentSession.clientId,
+      deviceId: currentSession.deviceId,
+      adId,
+      action,
+      ...reportPayload,
+    };
+
+    adReportQueueRef.current = adReportQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        if (sessionRef.current?.sessionId !== request.sessionId) {
+          return;
+        }
+
+        try {
+          console.log(
+            `[QueueAds] Sending ad update: action=${action}, adId=${adId}, sessionId=${request.sessionId}, zone=${request.zone}, ` +
+              `serverIp=${request.serverIp}, queuePosition=${sessionRef.current?.queuePosition ?? "n/a"}, ` +
+              `watchedTimeInMs=${request.watchedTimeInMs ?? "n/a"}, pausedTimeInMs=${request.pausedTimeInMs ?? 0}, ` +
+                `cancelReason=${request.cancelReason ?? "n/a"}, errorInfo=${request.errorInfo ?? "n/a"}`,
+          );
+          const updated = await window.openNow.reportSessionAd(request);
+          if (sessionRef.current?.sessionId !== updated.sessionId) {
+            return;
+          }
+
+          console.log(
+            `[QueueAds] Ad update succeeded: action=${action}, adId=${adId}, sessionId=${updated.sessionId}, ` +
+              `status=${updated.status}, queuePosition=${updated.queuePosition ?? "n/a"}`,
+          );
+          console.log(
+            `[QueueAds] Returned ad state: sessionId=${updated.sessionId}, adsRequired=${isSessionAdsRequired(updated.adState)}, ` +
+              `queuePaused=${getSessionAdOpportunity(updated.adState)?.queuePaused ?? false}, gracePeriodSeconds=${getSessionAdOpportunity(updated.adState)?.gracePeriodSeconds ?? "n/a"}, ` +
+              `adCount=${getSessionAdItems(updated.adState).length}`,
+          );
+
+          setSession((previous) => {
+            if (!previous || previous.sessionId !== updated.sessionId) {
+              return previous;
+            }
+            return mergePolledSessionState(previous, updated);
+          });
+          setQueuePosition(updated.queuePosition);
+          const updatedAd = getSessionAdItems(updated.adState).find((candidate) => candidate.adId === adId);
+          const updatedAdMediaUrl = getPreferredSessionAdMediaUrl(updatedAd);
+          if (updatedAdMediaUrl) {
+            adMediaUrlCacheRef.current[adId] = updatedAdMediaUrl;
+          }
+
+          if (action === "finish" || action === "cancel") {
+            clearQueueAdMetrics(adId);
+            if (queueAdPlaybackRef.current?.adId === adId) {
+              queueAdPlaybackRef.current = null;
+            }
+          }
+        } catch (error) {
+          console.warn(`[QueueAds] Failed to report ${action} for ${adId}:`, error);
+
+          if (action === "finish") {
+            // The server rejected the finish (e.g. session was re-queued mid-ad,
+            // invalidating the ad token). Clear the local ad list so the player
+            // falls back to the placeholder card while the server sends fresh
+            // creatives in the next poll. Setting serverSentEmptyAds=false prevents
+            // mergeAdState from restoring the now-stale ad URLs from the previous
+            // state captured in the polling loop's latestSession snapshot.
+            console.log(`[QueueAds] finish rejected — clearing local ad list for adId=${adId}`);
+            delete adReportStateRef.current[adId];
+            clearQueueAdMetrics(adId);
+            if (queueAdPlaybackRef.current?.adId === adId) {
+              queueAdPlaybackRef.current = null;
+            }
+            setSession((previous) => {
+              if (!previous || !previous.adState) {
+                return previous;
+              }
+              return {
+                ...previous,
+                adState: { ...previous.adState, sessionAds: [], ads: [], serverSentEmptyAds: false },
+              };
+            });
+          }
+        }
+      });
+  }, [authSession, clearQueueAdMetrics, effectiveStreamingBaseUrl, getQueueAdReportPayload]);
+
+  const handleQueueAdPlaybackEvent = useCallback((event: QueueAdPlaybackEvent, adId: string): void => {
+    const currentSession = sessionRef.current;
+    const currentAd = getSessionAdItems(currentSession?.adState).find((ad) => ad.adId === adId);
+    if (!currentAd) {
+      return;
+    }
+
+    const lastAction = adReportStateRef.current[adId];
+
+    if (event === "loadstart") {
+      activeQueueAdIdRef.current = adId;
+      setActiveQueueAdId((previous) => (previous === adId ? previous : adId));
+      resetQueueAdMetrics(adId);
+      queueAdPlaybackRef.current = null;
+      clearQueueAdProgressWatchdog();
+      armQueueAdStartWatchdogs(adId);
+      return;
+    }
+
+    if (event === "timeupdate") {
+      adLastProgressTsRef.current = Date.now();
+      return;
+    }
+
+    if (event === "playing") {
+      activeQueueAdIdRef.current = adId;
+      setActiveQueueAdId((previous) => (previous === adId ? previous : adId));
+      clearQueueAdStartWatchdogs();
+      ensureQueueAdProgressWatchdog(adId);
+      queueAdPlaybackRef.current = { adId, phase: "playing" };
+
+      const nextAction = getNextAdReportAction(lastAction, "playing");
+      if (!nextAction) {
+        return;
+      }
+      if (nextAction === "start") {
+        markQueueAdStarted(adId);
+      }
+      adReportStateRef.current[adId] = nextAction;
+      reportQueueAdAction(adId, nextAction);
+      return;
+    }
+
+    if (event === "paused") {
+      if (queueAdPlaybackRef.current?.adId === adId) {
+        queueAdPlaybackRef.current = null;
+      }
+      const nextAction = getNextAdReportAction(lastAction, "paused");
+      if (nextAction) {
+        markQueueAdPaused(adId);
+        adReportStateRef.current[adId] = nextAction;
+        reportQueueAdAction(adId, nextAction);
+      }
+      return;
+    }
+
+    if (event === "ended") {
+      clearQueueAdWatchdogs();
+      if (lastAction === "finish" || lastAction === "cancel") {
+        return;
+      }
+
+      const nextAd = getNextQueueAd(currentSession?.adState, adId);
+      if (nextAd) {
+        activeQueueAdIdRef.current = nextAd.adId;
+        setActiveQueueAdId((previous) => (previous === nextAd.adId ? previous : nextAd.adId));
+      }
+
+      queueAdPlaybackRef.current = { adId, phase: "finishing" };
+      const nextAction = getNextAdReportAction(lastAction, "ended");
+      if (!nextAction) {
+        return;
+      }
+      adReportStateRef.current[adId] = nextAction;
+      reportQueueAdAction(adId, nextAction);
+      return;
+    }
+
+    if (event === "error") {
+      clearQueueAdWatchdogs();
+      if (lastAction === "finish" || lastAction === "cancel") {
+        return;
+      }
+      queueAdPlaybackRef.current = null;
+      adReportStateRef.current[adId] = "cancel";
+      reportQueueAdAction(adId, "cancel", {
+        cancelReason: "error",
+        errorInfo: "Error loading url",
+      });
+    }
+  }, [armQueueAdStartWatchdogs, clearQueueAdProgressWatchdog, clearQueueAdStartWatchdogs, clearQueueAdWatchdogs, ensureQueueAdProgressWatchdog, markQueueAdPaused, markQueueAdStarted, reportQueueAdAction, resetQueueAdMetrics]);
+
+  // Keep the ref in sync so timer callbacks always use the latest auth state.
+  useEffect(() => {
+    reportQueueAdActionRef.current = reportQueueAdAction;
+  }, [reportQueueAdAction]);
 
   const loadSubscriptionInfo = useCallback(
     async (session: AuthSession): Promise<void> => {
@@ -889,6 +1591,7 @@ export function App(): JSX.Element {
         // Load settings first
         const loadedSettings = await window.openNow.getSettings();
         setSettings(loadedSettings);
+        setShowStatsOverlay(loadedSettings.showStatsOnLaunch);
         setSettingsLoaded(true);
 
         // Load providers and session (refresh only if token is near expiry)
@@ -996,6 +1699,18 @@ export function App(): JSX.Element {
 
     void initialize();
   }, []);
+
+  useEffect(() => {
+    saveStoredCodecResults(codecResults);
+  }, [codecResults]);
+
+  useEffect(() => {
+    if (codecResults || codecTesting || codecStartupTestAttemptedRef.current) {
+      return;
+    }
+    codecStartupTestAttemptedRef.current = true;
+    void runCodecTest();
+  }, [codecResults, codecTesting, runCodecTest]);
 
   // Auto-load controller library at startup if enabled
   useEffect(() => {
@@ -1171,21 +1886,6 @@ export function App(): JSX.Element {
     }
   }, [currentPage, streamStatus]);
 
-  useEffect(() => {
-    if (streamStatus === "idle" || sessionStartedAtMs === null) {
-      setSessionElapsedSeconds(0);
-      return;
-    }
-
-    const updateElapsed = () => {
-      const elapsed = Math.max(0, Math.floor((Date.now() - sessionStartedAtMs) / 1000));
-      setSessionElapsedSeconds(elapsed);
-    };
-
-    updateElapsed();
-    const timer = window.setInterval(updateElapsed, 1000);
-    return () => window.clearInterval(timer);
-  }, [sessionStartedAtMs, streamStatus]);
 
   useEffect(() => {
     if (streamStatus !== "streaming" || sessionStartedAtMs !== null) {
@@ -1207,13 +1907,45 @@ export function App(): JSX.Element {
   }, [sessionStartedAtMs, streamStatus]);
 
   useEffect(() => {
-    if (!streamWarning) return;
-    const warning = streamWarning;
+    if (freeTierSessionRemainingSeconds === null) {
+      previousFreeTierRemainingSecondsRef.current = null;
+      setLocalSessionTimerWarning(null);
+      return;
+    }
+
+    const previousSeconds = previousFreeTierRemainingSecondsRef.current;
+
+    if (hasCrossedWarningThreshold(previousSeconds, freeTierSessionRemainingSeconds, FREE_TIER_FINAL_MINUTE_WARNING_SECONDS)) {
+      setLocalSessionTimerWarning({ stage: "free-tier-final-minute", shownAtMs: Date.now() });
+    } else if (hasCrossedWarningThreshold(previousSeconds, freeTierSessionRemainingSeconds, FREE_TIER_15_MIN_WARNING_SECONDS)) {
+      setLocalSessionTimerWarning({ stage: "free-tier-15m", shownAtMs: Date.now() });
+    } else if (hasCrossedWarningThreshold(previousSeconds, freeTierSessionRemainingSeconds, FREE_TIER_30_MIN_WARNING_SECONDS)) {
+      setLocalSessionTimerWarning({ stage: "free-tier-30m", shownAtMs: Date.now() });
+    }
+
+    previousFreeTierRemainingSecondsRef.current = freeTierSessionRemainingSeconds;
+  }, [freeTierSessionRemainingSeconds]);
+
+  useEffect(() => {
+    if (!localSessionTimerWarning) return;
+
+    const warning = localSessionTimerWarning;
+    const remainingMs = Math.max(0, warning.shownAtMs + STREAM_WARNING_VISIBILITY_MS - Date.now());
     const timer = window.setTimeout(() => {
-      setStreamWarning((current) => (current === warning ? null : current));
-    }, 12000);
+      setLocalSessionTimerWarning((current) => (current === warning ? null : current));
+    }, remainingMs);
     return () => window.clearTimeout(timer);
-  }, [streamWarning]);
+  }, [localSessionTimerWarning]);
+
+  useEffect(() => {
+    if (!remoteStreamWarning) return;
+
+    const warning = remoteStreamWarning;
+    const timer = window.setTimeout(() => {
+      setRemoteStreamWarning((current) => (current === warning ? null : current));
+    }, STREAM_WARNING_VISIBILITY_MS);
+    return () => window.clearTimeout(timer);
+  }, [remoteStreamWarning]);
 
   // Signaling events
   useEffect(() => {
@@ -1248,7 +1980,7 @@ export function App(): JSX.Element {
                 setEscHoldReleaseIndicator({ visible, progress });
               },
               onTimeWarning: (warning) => {
-                setStreamWarning({
+                setRemoteStreamWarning({
                   code: warning.code,
                   message: warningMessage(warning.code),
                   tone: warningTone(warning.code),
@@ -1516,6 +2248,7 @@ export function App(): JSX.Element {
         maxBitrateMbps: settings.maxBitrateMbps,
         codec: settings.codec,
         colorQuality: settings.colorQuality,
+        keyboardLayout: settings.keyboardLayout,
         gameLanguage: settings.gameLanguage,
         enableL4S: settings.enableL4S,
       },
@@ -1539,7 +2272,7 @@ export function App(): JSX.Element {
       signalingServer: claimed.signalingServer,
       signalingUrl: claimed.signalingUrl,
     });
-  }, [authSession, effectiveStreamingBaseUrl, findGameContextForSession, settings]);
+  }, [authSession, effectiveStreamingBaseUrl, findGameContextForSession, resetStatsOverlayToPreference, settings]);
 
   // Play game handler
   const handlePlayGame = useCallback(async (game: GameInfo, options?: { bypassGuards?: boolean }) => {
@@ -1569,9 +2302,10 @@ export function App(): JSX.Element {
     };
 
     setSessionStartedAtMs(null);
-    setSessionElapsedSeconds(0);
-    setStreamWarning(null);
+  setRemoteStreamWarning(null);
+  setLocalSessionTimerWarning(null);
     setLaunchError(null);
+    resetStatsOverlayToPreference();
     const selectedVariantId = variantByGameId[game.id] ?? defaultVariantId(game);
     const selectedVariant = getSelectedVariant(game, selectedVariantId);
     startPlaytimeSession(game.id);
@@ -1621,8 +2355,12 @@ export function App(): JSX.Element {
         try {
           const activeSessions = await window.openNow.getActiveSessions(token, effectiveStreamingBaseUrl);
           if (activeSessions.length > 0) {
-            const matchingSession = activeSessions.find((entry) => entry.appId === numericAppId) ?? null;
-            const otherSession = activeSessions[0] ?? null;
+            // Only claim sessions that are already paused/ready (status 2 or 3).
+            // Status=1 sessions are still in queue/setup; sending a RESUME claim
+            // skips the queue/ad phase entirely. Let them fall through to
+            // createSession so the polling loop handles queue position and ads.
+            const matchingSession = activeSessions.find((entry) => entry.appId === numericAppId && (entry.status === 2 || entry.status === 3)) ?? null;
+            const otherSession = activeSessions.find((s) => s.status === 2 || s.status === 3) ?? null;
 
             if (matchingSession) {
               await claimAndConnectSession(matchingSession);
@@ -1663,6 +2401,7 @@ export function App(): JSX.Element {
           maxBitrateMbps: settings.maxBitrateMbps,
           codec: settings.codec,
           colorQuality: settings.colorQuality,
+          keyboardLayout: settings.keyboardLayout,
           gameLanguage: settings.gameLanguage,
           enableL4S: settings.enableL4S,
         },
@@ -1675,14 +2414,57 @@ export function App(): JSX.Element {
       // Queue mode: no timeout - users wait indefinitely and see position updates.
       // Setup/Starting mode: 180s timeout applies while machine is being allocated.
       let finalSession: SessionInfo | null = null;
+      let latestSession = newSession;
       let isInQueueMode = isSessionInQueue(newSession);
-      let timeoutStartAttempt = 1;
-      const maxAttempts = Math.ceil(SESSION_READY_TIMEOUT_MS / SESSION_READY_POLL_INTERVAL_MS);
+      let setupTimeoutStartAt: number | null = isInQueueMode ? null : Date.now();
       let attempt = 0;
 
       while (true) {
         attempt++;
-        await sleep(SESSION_READY_POLL_INTERVAL_MS);
+
+        const pollIntervalMs = shouldUseQueueAdPolling(latestSession, subscriptionInfo, authSession)
+          ? SESSION_AD_POLL_INTERVAL_MS
+          : SESSION_READY_POLL_INTERVAL_MS;
+
+        // Sleep in small ticks during ad-polling intervals so the loop can react
+        // quickly when reportSessionAd clears isAdsRequired (which only updates
+        // sessionRef, not the local latestSession variable).  Standard 2 s intervals
+        // are kept as a single sleep since they're already short.
+        if (pollIntervalMs > SESSION_READY_POLL_INTERVAL_MS) {
+          const tickMs = 500;
+          let elapsed = 0;
+          while (elapsed < pollIntervalMs) {
+            await sleep(tickMs);
+            elapsed += tickMs;
+            if (launchAbortRef.current) return;
+            // Sync ad-action responses from sessionRef into the local tracking variable
+            // so shouldUseQueueAdPolling sees the updated adState immediately.
+            const refSession = sessionRef.current;
+            if (refSession && refSession.sessionId === latestSession.sessionId) {
+              latestSession = mergePolledSessionState(latestSession, refSession);
+            }
+            // Break out of the sleep early when ads are no longer required.
+            if (!shouldUseQueueAdPolling(latestSession, subscriptionInfo, authSession)) {
+              break;
+            }
+          }
+        } else {
+          await sleep(pollIntervalMs);
+        }
+
+        if (shouldUseQueueAdPolling(latestSession, subscriptionInfo, authSession) && queueAdPlaybackRef.current) {
+          const graceDeadline = Date.now() + 5000;
+          while (queueAdPlaybackRef.current && Date.now() < graceDeadline) {
+            await sleep(200);
+            if (launchAbortRef.current) {
+              return;
+            }
+          }
+        }
+
+        if (launchAbortRef.current) {
+          return;
+        }
 
         if (launchAbortRef.current) {
           return;
@@ -1702,35 +2484,38 @@ export function App(): JSX.Element {
           return;
         }
 
-        setSession(polled);
-        setQueuePosition(polled.queuePosition);
+        const mergedSession = mergePolledSessionState(latestSession, polled);
+        latestSession = mergedSession;
+
+        setSession(mergedSession);
+        setQueuePosition(mergedSession.queuePosition);
 
         // Check if queue just cleared - transition from queue mode to setup mode
         const wasInQueueMode = isInQueueMode;
-        isInQueueMode = isSessionInQueue(polled);
+        isInQueueMode = isSessionInQueue(mergedSession);
         if (wasInQueueMode && !isInQueueMode) {
-          // Queue just cleared, start timeout counting from now
-          timeoutStartAttempt = attempt;
+          // Queue just cleared, start timeout counting from now.
+          setupTimeoutStartAt = Date.now();
         }
 
         console.log(
-          `Poll attempt ${attempt}: status=${polled.status}, seatSetupStep=${polled.seatSetupStep ?? "n/a"}, queuePosition=${polled.queuePosition ?? "n/a"}, serverIp=${polled.serverIp}, queueMode=${isInQueueMode}`,
+          `Poll attempt ${attempt}: status=${mergedSession.status}, seatSetupStep=${mergedSession.seatSetupStep ?? "n/a"}, queuePosition=${mergedSession.queuePosition ?? "n/a"}, serverIp=${mergedSession.serverIp}, queueMode=${isInQueueMode}, adsRequired=${isSessionAdsRequired(mergedSession.adState)}`,
         );
 
-        if (isSessionReadyForConnect(polled.status)) {
-          finalSession = polled;
+        if (isSessionReadyForConnect(mergedSession.status)) {
+          finalSession = mergedSession;
           break;
         }
 
         // Update status based on session state
         if (isInQueueMode) {
           updateLoadingStep("queue");
-        } else if (polled.status === 1) {
+        } else if (mergedSession.status === 1) {
           updateLoadingStep("setup");
         }
 
         // Only check timeout when NOT in queue mode (i.e., during setup/starting)
-        if (!isInQueueMode && attempt - timeoutStartAttempt >= maxAttempts) {
+        if (!isInQueueMode && setupTimeoutStartAt !== null && Date.now() - setupTimeoutStartAt >= SESSION_READY_TIMEOUT_MS) {
           throw new Error(`Session did not become ready in time (${Math.round(SESSION_READY_TIMEOUT_MS / 1000)}s)`);
         }
       }
@@ -1741,8 +2526,11 @@ export function App(): JSX.Element {
       setQueuePosition(undefined);
       updateLoadingStep("connecting");
 
-      // Use the polled session data which has the latest signaling info
-      const sessionToConnect = sessionRef.current ?? finalSession ?? newSession;
+      // Use finalSession (the status=2 poll result) as the authoritative source for
+      // signaling coordinates — it carries the real server IP resolved at the moment
+      // the rig became ready. sessionRef.current may still hold stale zone-LB data
+      // from a prior React render cycle.
+      const sessionToConnect = finalSession ?? sessionRef.current ?? newSession;
       console.log("Connecting signaling with:", {
         sessionId: sessionToConnect.sessionId,
         signalingServer: sessionToConnect.signalingServer,
@@ -1776,6 +2564,7 @@ export function App(): JSX.Element {
     effectiveStreamingBaseUrl,
     refreshNavbarActiveSession,
     resetLaunchRuntime,
+    resetStatsOverlayToPreference,
     selectedProvider,
     settings,
     streamStatus,
@@ -1801,8 +2590,9 @@ export function App(): JSX.Element {
     setLaunchError(null);
     setQueuePosition(undefined);
     setSessionStartedAtMs(null);
-    setSessionElapsedSeconds(0);
-    setStreamWarning(null);
+    setRemoteStreamWarning(null);
+    setLocalSessionTimerWarning(null);
+    resetStatsOverlayToPreference();
     const matchedContext = findGameContextForSession(navbarActiveSession);
     if (matchedContext) {
       setStreamingGame(matchedContext.game);
@@ -1834,6 +2624,7 @@ export function App(): JSX.Element {
     findGameContextForSession,
     refreshNavbarActiveSession,
     resetLaunchRuntime,
+    resetStatsOverlayToPreference,
     selectedProvider,
     streamStatus,
   ]);
@@ -2118,6 +2909,50 @@ export function App(): JSX.Element {
     return null;
   }, [gameTitleByAppId, navbarActiveSession, session?.sessionId, streamingGame?.title]);
 
+  const effectiveAdState = getEffectiveAdState(session, subscriptionInfo, authSession);
+  const activeQueueAd = useMemo(
+    () => getActiveQueueAd(effectiveAdState, activeQueueAdId),
+    [activeQueueAdId, effectiveAdState],
+  );
+  const activeQueueAdMediaUrl = getPreferredSessionAdMediaUrl(activeQueueAd) ?? (activeQueueAd ? adMediaUrlCacheRef.current[activeQueueAd.adId] : undefined);
+
+  useEffect(() => {
+    const nextActiveAd = getActiveQueueAd(effectiveAdState, activeQueueAdIdRef.current);
+    const nextActiveAdId = nextActiveAd?.adId ?? null;
+    activeQueueAdIdRef.current = nextActiveAdId;
+    setActiveQueueAdId((previous) => (previous === nextActiveAdId ? previous : nextActiveAdId));
+
+    if (!nextActiveAdId) {
+      clearQueueAdWatchdogs();
+    }
+  }, [clearQueueAdWatchdogs, effectiveAdState]);
+
+  useEffect(() => {
+    if (!activeQueueAd) {
+      return;
+    }
+
+    const syncQueueAdVisibility = (): void => {
+      const preview = queueAdPreviewRef.current;
+      if (!preview) {
+        return;
+      }
+
+      if (document.hidden || isSessionQueuePaused(effectiveAdState)) {
+        preview.pause();
+        return;
+      }
+
+      void preview.resume();
+    };
+
+    syncQueueAdVisibility();
+    document.addEventListener("visibilitychange", syncQueueAdVisibility);
+    return () => {
+      document.removeEventListener("visibilitychange", syncQueueAdVisibility);
+    };
+  }, [activeQueueAd, effectiveAdState]);
+
   // Show login screen if not authenticated
   if (!authSession) {
     return (
@@ -2137,6 +2972,16 @@ export function App(): JSX.Element {
   }
 
   const showLaunchOverlay = streamStatus !== "idle" || launchError !== null || isSwitchingGame;
+  const hasActiveStreamView = streamStatus !== "idle";
+  const showLaunchErrorOverlay = launchError !== null;
+  const showControllerLaunchLoading =
+    !isSwitchingGame
+    && settings.controllerMode
+    && (showLaunchErrorOverlay || (streamStatus !== "idle" && streamStatus !== "streaming" && streamStatus !== "connecting"));
+  const showDesktopLaunchLoading =
+    !isSwitchingGame
+    && !settings.controllerMode
+    && (showLaunchErrorOverlay || (streamStatus !== "idle" && streamStatus !== "streaming"));
   const consumedHours =
     streamStatus === "streaming"
       ? Math.floor(sessionElapsedSeconds / 60) / 60
@@ -2148,7 +2993,7 @@ export function App(): JSX.Element {
     const loadingStatus = launchError ? launchError.stage : toLoadingStatus(streamStatus);
     return (
       <>
-        {streamStatus !== "idle" && (
+        {hasActiveStreamView && (
           <StreamView
             className={isSwitchingGame ? "sv--switching" : undefined}
             videoRef={videoRef}
@@ -2168,11 +3013,13 @@ export function App(): JSX.Element {
             antiAfkEnabled={antiAfkEnabled}
             escHoldReleaseIndicator={escHoldReleaseIndicator}
             exitPrompt={exitPrompt}
-            sessionElapsedSeconds={sessionElapsedSeconds}
+            sessionStartedAtMs={sessionStartedAtMs}
+            sessionCounterEnabled={settings.sessionCounterEnabled}
             sessionClockShowEveryMinutes={settings.sessionClockShowEveryMinutes}
             sessionClockShowDurationSeconds={settings.sessionClockShowDurationSeconds}
             streamWarning={streamWarning}
             isConnecting={streamStatus === "connecting"}
+            isStreaming={isStreaming}
             gameTitle={streamingGame?.title ?? "Game"}
             platformStore={streamingStore ?? undefined}
             onToggleFullscreen={() => {
@@ -2202,7 +3049,7 @@ export function App(): JSX.Element {
             onRecordingShortcutChange={(value) => {
               void updateSetting("shortcutToggleRecording", value);
             }}
-            remainingPlaytimeText={remainingPlaytimeText}
+            subscriptionInfo={subscriptionInfo}
             micTrack={clientRef.current?.getMicTrack() ?? null}
             onRequestPointerLock={handleRequestPointerLock}
             onReleasePointerLock={() => {
@@ -2217,6 +3064,20 @@ export function App(): JSX.Element {
             gameDescription={pendingSwitchGameDescription ?? streamingGame?.description}
             status={switchingPhase === "cleaning" ? "setup" : "starting"}
             queuePosition={queuePosition}
+            adState={effectiveAdState}
+            activeAd={activeQueueAd}
+            activeAdMediaUrl={activeQueueAdMediaUrl}
+            error={
+              launchError
+                ? {
+                    title: launchError.title,
+                    description: launchError.description,
+                    code: launchError.codeLabel,
+                  }
+                : undefined
+            }
+            onAdPlaybackEvent={handleQueueAdPlaybackEvent}
+            adPreviewRef={queueAdPreviewRef}
             playtimeData={playtime}
             gameId={pendingSwitchGameId ?? streamingGame?.id}
             enableBackgroundAnimations={settings.controllerBackgroundAnimations}
@@ -2229,6 +3090,11 @@ export function App(): JSX.Element {
             platformStore={streamingStore ?? undefined}
             status={switchingPhase === "cleaning" ? "setup" : "starting"}
             queuePosition={queuePosition}
+            adState={effectiveAdState}
+            activeAd={activeQueueAd}
+            activeAdMediaUrl={activeQueueAdMediaUrl}
+            onAdPlaybackEvent={handleQueueAdPlaybackEvent}
+            adPreviewRef={queueAdPreviewRef}
             error={
               launchError
                 ? {
@@ -2273,9 +3139,11 @@ export function App(): JSX.Element {
               pendingSwitchGameCover={pendingSwitchGameCover}
               userName={authSession?.user.displayName}
               userAvatarUrl={authSession?.user.avatarUrl}
-              remainingPlaytimeText={remainingPlaytimeText}
+              subscriptionInfo={subscriptionInfo}
               playtimeData={playtime}
-              sessionElapsedSeconds={sessionElapsedSeconds}
+              sessionStartedAtMs={sessionStartedAtMs}
+              isStreaming={isStreaming}
+              sessionCounterEnabled={settings.sessionCounterEnabled}
               settings={{
                 resolution: settings.resolution,
                 fps: settings.fps,
@@ -2297,25 +3165,44 @@ export function App(): JSX.Element {
             />
           </div>
         )}
-        {streamStatus !== "idle" && streamStatus !== "streaming" && streamStatus !== "connecting" && settings.controllerMode && !isSwitchingGame && (
+        {showControllerLaunchLoading && (
           <ControllerStreamLoading
             gameTitle={streamingGame?.title ?? "Game"}
             gamePoster={streamingGame?.imageUrl}
             gameDescription={streamingGame?.description}
             status={loadingStatus}
             queuePosition={queuePosition}
+            adState={effectiveAdState}
+            activeAd={activeQueueAd}
+            activeAdMediaUrl={activeQueueAdMediaUrl}
+            error={
+              launchError
+                ? {
+                    title: launchError.title,
+                    description: launchError.description,
+                    code: launchError.codeLabel,
+                  }
+                : undefined
+            }
+            onAdPlaybackEvent={handleQueueAdPlaybackEvent}
+            adPreviewRef={queueAdPreviewRef}
             playtimeData={playtime}
             gameId={streamingGame?.id}
             enableBackgroundAnimations={settings.controllerBackgroundAnimations}
           />
         )}
-        {streamStatus !== "idle" && streamStatus !== "streaming" && !settings.controllerMode && !isSwitchingGame && (
+        {showDesktopLaunchLoading && (
           <StreamLoading
             gameTitle={streamingGame?.title ?? "Game"}
             gameCover={streamingGame?.imageUrl}
             platformStore={streamingStore ?? undefined}
             status={loadingStatus}
             queuePosition={queuePosition}
+            adState={effectiveAdState}
+            activeAd={activeQueueAd}
+            activeAdMediaUrl={activeQueueAdMediaUrl}
+            onAdPlaybackEvent={handleQueueAdPlaybackEvent}
+            adPreviewRef={queueAdPreviewRef}
             error={
               launchError
                 ? {
@@ -2406,9 +3293,11 @@ export function App(): JSX.Element {
               pendingSwitchGameCover={pendingSwitchGameCover}
               userName={authSession?.user.displayName}
               userAvatarUrl={authSession?.user.avatarUrl}
-              remainingPlaytimeText={remainingPlaytimeText}
+              subscriptionInfo={subscriptionInfo}
               playtimeData={playtime}
-              sessionElapsedSeconds={sessionElapsedSeconds}
+              sessionStartedAtMs={sessionStartedAtMs}
+              isStreaming={isStreaming}
+              sessionCounterEnabled={settings.sessionCounterEnabled}
               settings={{
                 resolution: settings.resolution,
                 fps: settings.fps,
@@ -2449,6 +3338,9 @@ export function App(): JSX.Element {
           <SettingsPage
             settings={settings}
             regions={regions}
+            codecResults={codecResults}
+            codecTesting={codecTesting}
+            onRunCodecTest={runCodecTest}
             onSettingChange={updateSetting}
           />
         )}

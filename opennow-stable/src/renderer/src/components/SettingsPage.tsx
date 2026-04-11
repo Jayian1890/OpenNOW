@@ -1,4 +1,4 @@
-import { Globe, Check, Search, X, Loader, Zap, Mic, FileDown, Wifi, Trash2 } from "lucide-react";
+import { Globe, Check, Search, X, Loader, Zap, Mic, FileDown, Wifi, Trash2, Heart, Users, ExternalLink } from "lucide-react";
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import type { JSX } from "react";
 
@@ -8,27 +8,51 @@ import type {
   VideoCodec,
   ColorQuality,
   EntitledResolution,
+  VideoAccelerationPreference,
   MicrophoneMode,
   PingResult,
   GameLanguage,
+  MicrophonePermissionResult,
+  ThankYouDataResult,
+  ThankYouContributor,
+  ThankYouSupporter,
 } from "@shared/gfn";
-import { colorQualityRequiresHevc } from "@shared/gfn";
+import {
+  colorQualityRequiresHevc,
+  keyboardLayoutOptions,
+  USER_FACING_COLOR_QUALITY_OPTIONS,
+  USER_FACING_VIDEO_CODEC_OPTIONS,
+} from "@shared/gfn";
 import { formatShortcutForDisplay, normalizeShortcut } from "../shortcuts";
+import { getCodecDecodeBadgeState, type CodecTestResult } from "../lib/codecDiagnostics";
 
 interface SettingsPageProps {
   settings: Settings;
   regions: StreamRegion[];
+  codecResults: CodecTestResult[] | null;
+  codecTesting: boolean;
+  onRunCodecTest: () => Promise<void>;
   onSettingChange: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
 }
 
-const codecOptions: VideoCodec[] = ["H264", "H265", "AV1"];
+type ThanksLoadState = "idle" | "loading" | "loaded" | "error";
 
-const colorQualityOptions: { value: ColorQuality; label: string; description: string }[] = [
-  { value: "8bit_420", label: "8-bit 4:2:0", description: "Most compatible" },
-  { value: "8bit_444", label: "8-bit 4:4:4", description: "Better color" },
-  { value: "10bit_420", label: "10-bit 4:2:0", description: "HDR ready" },
-  { value: "10bit_444", label: "10-bit 4:4:4", description: "Best quality" },
+const codecOptions: VideoCodec[] = [...USER_FACING_VIDEO_CODEC_OPTIONS];
+
+const accelerationOptions: { value: VideoAccelerationPreference; label: string }[] = [
+  { value: "auto", label: "Auto" },
+  { value: "hardware", label: "Hardware" },
+  { value: "software", label: "Software (CPU)" },
 ];
+
+const allColorQualityOptions: { value: ColorQuality; label: string; description: string }[] = [
+  { value: "8bit_420", label: "8-bit 4:2:0", description: "Most compatible" },
+  { value: "8bit_444", label: "8-bit 4:4:4", description: "Sharper chroma" },
+  { value: "10bit_420", label: "10-bit 4:2:0", description: "Higher bit depth" },
+  { value: "10bit_444", label: "10-bit 4:4:4", description: "Highest chroma and bit depth" },
+];
+
+const colorQualityOptions: { value: ColorQuality; label: string; description: string }[] = [...allColorQualityOptions];
 
 /* ── Static fallbacks (used when MES API is unavailable) ─────────── */
 
@@ -96,6 +120,19 @@ const microphoneModeOptions: Array<{ value: MicrophoneMode; label: string }> = [
   { value: "push-to-talk", label: "Push-to-Talk" },
   { value: "voice-activity", label: "Voice Activity" },
 ];
+
+function getMicrophonePermissionError(result: MicrophonePermissionResult): string {
+  switch (result.status) {
+    case "denied":
+      return "Microphone access was denied. Enable microphone access for OpenNOW in System Settings → Privacy & Security → Microphone.";
+    case "restricted":
+      return "Microphone access is restricted by macOS and cannot be enabled from OpenNOW.";
+    case "unknown":
+      return "Unable to determine microphone permission status. Check macOS microphone privacy settings for OpenNOW.";
+    default:
+      return "Microphone access is not available.";
+  }
+}
 
 const gameLanguageOptions: Array<{ value: GameLanguage; label: string }> = [
   { value: "en_US", label: "English (US)" },
@@ -220,88 +257,12 @@ function getFpsForResolution(entitled: EntitledResolution[], resolution: string)
   return [...new Set(fpsList)].sort((a, b) => a - b);
 }
 
-/* ── Codec diagnostics ────────────────────────────────────────────── */
-
-interface CodecTestResult {
-  codec: string;
-  /** Whether WebRTC can negotiate this codec at all */
-  webrtcSupported: boolean;
-  /** Whether MediaCapabilities reports decode support */
-  decodeSupported: boolean;
-  /** Whether MediaCapabilities says HW-accelerated (powerEfficient) */
-  hwAccelerated: boolean;
-  /** Whether encode is supported */
-  encodeSupported: boolean;
-  /** Whether encode is HW-accelerated */
-  encodeHwAccelerated: boolean;
-  /** Human-readable decode method (e.g. "D3D11", "VAAPI", "VideoToolbox", "Software") */
-  decodeVia: string;
-  /** Human-readable encode method */
-  encodeVia: string;
-  /** Profiles found in WebRTC capabilities */
-  profiles: string[];
-}
-
-/** Map of codec name to MediaCapabilities contentType and profile strings */
-const CODEC_TEST_CONFIGS: {
-  name: string;
-  webrtcMime: string;
-  decodeContentType: string;
-  encodeContentType: string;
-  profiles: { label: string; contentType: string }[];
-}[] = [
-  {
-    name: "H264",
-    webrtcMime: "video/H264",
-    decodeContentType: "video/mp4; codecs=\"avc1.42E01E\"",
-    encodeContentType: "video/mp4; codecs=\"avc1.42E01E\"",
-    profiles: [
-      { label: "Baseline", contentType: "video/mp4; codecs=\"avc1.42E01E\"" },
-      { label: "Main", contentType: "video/mp4; codecs=\"avc1.4D401E\"" },
-      { label: "High", contentType: "video/mp4; codecs=\"avc1.64001E\"" },
-    ],
-  },
-  {
-    name: "H265",
-    webrtcMime: "video/H265",
-    decodeContentType: "video/mp4; codecs=\"hev1.1.6.L93.B0\"",
-    encodeContentType: "video/mp4; codecs=\"hev1.1.6.L93.B0\"",
-    profiles: [
-      { label: "Main", contentType: "video/mp4; codecs=\"hev1.1.6.L93.B0\"" },
-      { label: "Main 10", contentType: "video/mp4; codecs=\"hev1.2.4.L93.B0\"" },
-    ],
-  },
-  {
-    name: "AV1",
-    webrtcMime: "video/AV1",
-    decodeContentType: "video/mp4; codecs=\"av01.0.08M.08\"",
-    encodeContentType: "video/mp4; codecs=\"av01.0.08M.08\"",
-    profiles: [
-      { label: "Main 8-bit", contentType: "video/mp4; codecs=\"av01.0.08M.08\"" },
-      { label: "Main 10-bit", contentType: "video/mp4; codecs=\"av01.0.08M.10\"" },
-    ],
-  },
-];
-
-const CODEC_TEST_RESULTS_STORAGE_KEY = "opennow.codec-test-results.v1";
 const PING_RESULTS_STORAGE_KEY = "opennow.ping-results.v1";
 const ENTITLED_RESOLUTIONS_STORAGE_KEY = "opennow.entitled-resolutions.v1";
 
 interface EntitledResolutionsCache {
   userId: string;
   entitledResolutions: EntitledResolution[];
-}
-
-function loadStoredCodecResults(): CodecTestResult[] | null {
-  try {
-    const raw = window.sessionStorage.getItem(CODEC_TEST_RESULTS_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return null;
-    return parsed as CodecTestResult[];
-  } catch {
-    return null;
-  }
 }
 
 interface PingCacheEntry {
@@ -362,168 +323,20 @@ function saveCachedEntitledResolutions(cache: EntitledResolutionsCache): void {
   }
 }
 
-function isLinuxArmClient(): boolean {
-  const platform = navigator.platform?.toLowerCase() ?? "";
-  const ua = navigator.userAgent?.toLowerCase() ?? "";
-  const linux = platform.includes("linux") || ua.includes("linux");
-  const arm = /(aarch64|arm64|armv\d|arm)/.test(platform) || /(aarch64|arm64|armv\d|arm)/.test(ua);
-  return linux && arm;
-}
-
-function guessDecodeBackend(hwAccelerated: boolean): string {
-  if (!hwAccelerated) return "Software (CPU)";
-  const platform = navigator.platform?.toLowerCase() ?? "";
-  const ua = navigator.userAgent?.toLowerCase() ?? "";
-  if (platform.includes("win") || ua.includes("windows")) return "D3D11 (GPU)";
-  if (platform.includes("mac") || ua.includes("macintosh")) return "VideoToolbox (GPU)";
-  if (platform.includes("linux") || ua.includes("linux")) {
-    return isLinuxArmClient() ? "V4L2 (GPU)" : "VA-API (GPU)";
-  }
-  return "Hardware (GPU)";
-}
-
-function guessEncodeBackend(hwAccelerated: boolean): string {
-  if (!hwAccelerated) return "Software (CPU)";
-  const platform = navigator.platform?.toLowerCase() ?? "";
-  const ua = navigator.userAgent?.toLowerCase() ?? "";
-  if (platform.includes("win") || ua.includes("windows")) return "Media Foundation (GPU)";
-  if (platform.includes("mac") || ua.includes("macintosh")) return "VideoToolbox (GPU)";
-  if (platform.includes("linux") || ua.includes("linux")) {
-    return isLinuxArmClient() ? "V4L2 (GPU)" : "VA-API (GPU)";
-  }
-  return "Hardware (GPU)";
-}
-
-async function testCodecSupport(): Promise<CodecTestResult[]> {
-  const results: CodecTestResult[] = [];
-
-  // Get WebRTC receiver capabilities once
-  const webrtcCaps = RTCRtpReceiver.getCapabilities?.("video");
-  const webrtcCodecMimes = new Set(
-    webrtcCaps?.codecs.map((c) => c.mimeType.toLowerCase()) ?? [],
-  );
-
-  // Collect WebRTC profiles per codec
-  const webrtcProfiles = new Map<string, string[]>();
-  if (webrtcCaps) {
-    for (const c of webrtcCaps.codecs) {
-      const mime = c.mimeType.toLowerCase();
-      const sdpLine = (c as unknown as Record<string, string>).sdpFmtpLine ?? "";
-      if (!mime.includes("rtx") && !mime.includes("red") && !mime.includes("ulpfec")) {
-        const existing = webrtcProfiles.get(mime) ?? [];
-        if (sdpLine) existing.push(sdpLine);
-        webrtcProfiles.set(mime, existing);
-      }
-    }
-  }
-
-  for (const config of CODEC_TEST_CONFIGS) {
-    const webrtcSupported = webrtcCodecMimes.has(config.webrtcMime.toLowerCase());
-    const profiles = webrtcProfiles.get(config.webrtcMime.toLowerCase()) ?? [];
-
-    // Test decode via MediaCapabilities API
-    let decodeSupported = false;
-    let hwAccelerated = false;
-    try {
-      const decodeResult = await navigator.mediaCapabilities.decodingInfo({
-        type: "webrtc",
-        video: {
-          contentType: config.webrtcMime === "video/H265" ? "video/h265" : config.webrtcMime.toLowerCase(),
-          width: 1920,
-          height: 1080,
-          framerate: 60,
-          bitrate: 20_000_000,
-        },
-      });
-      decodeSupported = decodeResult.supported;
-      hwAccelerated = decodeResult.powerEfficient;
-    } catch {
-      // webrtc type may not be supported, fall back to file type
-      try {
-        const decodeResult = await navigator.mediaCapabilities.decodingInfo({
-          type: "file",
-          video: {
-            contentType: config.decodeContentType,
-            width: 1920,
-            height: 1080,
-            framerate: 60,
-            bitrate: 20_000_000,
-          },
-        });
-        decodeSupported = decodeResult.supported;
-        hwAccelerated = decodeResult.powerEfficient;
-      } catch {
-        // Codec not recognized at all
-      }
-    }
-
-    // Test encode via MediaCapabilities API
-    let encodeSupported = false;
-    let encodeHwAccelerated = false;
-    try {
-      const encodeResult = await navigator.mediaCapabilities.encodingInfo({
-        type: "webrtc",
-        video: {
-          contentType: config.webrtcMime === "video/H265" ? "video/h265" : config.webrtcMime.toLowerCase(),
-          width: 1920,
-          height: 1080,
-          framerate: 60,
-          bitrate: 20_000_000,
-        },
-      });
-      encodeSupported = encodeResult.supported;
-      encodeHwAccelerated = encodeResult.powerEfficient;
-    } catch {
-      try {
-        const encodeResult = await navigator.mediaCapabilities.encodingInfo({
-          type: "record",
-          video: {
-            contentType: config.encodeContentType,
-            width: 1920,
-            height: 1080,
-            framerate: 60,
-            bitrate: 20_000_000,
-          },
-        });
-        encodeSupported = encodeResult.supported;
-        encodeHwAccelerated = encodeResult.powerEfficient;
-      } catch {
-        // Codec not recognized at all
-      }
-    }
-
-    results.push({
-      codec: config.name,
-      webrtcSupported,
-      decodeSupported: decodeSupported || webrtcSupported, // WebRTC support implies decode
-      hwAccelerated,
-      encodeSupported,
-      encodeHwAccelerated,
-      decodeVia: (decodeSupported || webrtcSupported)
-        ? guessDecodeBackend(hwAccelerated)
-        : "Unsupported",
-      encodeVia: encodeSupported
-        ? guessEncodeBackend(encodeHwAccelerated)
-        : "Unsupported",
-      profiles,
-    });
-  }
-
-  return results;
-}
-
 /* ── Component ────────────────────────────────────────────────────── */
 
-export function SettingsPage({ settings, regions, onSettingChange }: SettingsPageProps): JSX.Element {
+export function SettingsPage({ settings, regions, onSettingChange, codecResults, codecTesting, onRunCodecTest }: SettingsPageProps): JSX.Element {
   const [savedIndicator, setSavedIndicator] = useState(false);
+  const [activeTab, setActiveTab] = useState<"preferences" | "thanks">("preferences");
+  const [thanksData, setThanksData] = useState<ThankYouDataResult | null>(null);
+  const [thanksLoadState, setThanksLoadState] = useState<ThanksLoadState>("idle");
+  const [thanksFetchError, setThanksFetchError] = useState<string | null>(null);
+  const thanksRequestIdRef = useRef(0);
+  const thanksMountedRef = useRef(true);
   const [regionSearch, setRegionSearch] = useState("");
   const [regionDropdownOpen, setRegionDropdownOpen] = useState(false);
 
-  // Codec diagnostics
-  const initialCodecResults = useMemo(() => loadStoredCodecResults(), []);
-  const [codecResults, setCodecResults] = useState<CodecTestResult[] | null>(initialCodecResults);
-  const [codecTesting, setCodecTesting] = useState(false);
-  const [codecTestOpen, setCodecTestOpen] = useState(() => initialCodecResults !== null);
+  const codecTestOpen = codecResults !== null || codecTesting;
 
   // Region ping state
   const initialPingResults = useMemo(() => loadStoredPingResults(), []);
@@ -594,31 +407,6 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
     }
   }, [regions, pingResults.size, isPinging, runPingTest]);
 
-  const runCodecTest = useCallback(async () => {
-    setCodecTesting(true);
-    setCodecTestOpen(true);
-    try {
-      const results = await testCodecSupport();
-      setCodecResults(results);
-    } catch (err) {
-      console.error("Codec test failed:", err);
-    } finally {
-      setCodecTesting(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    try {
-      if (codecResults && codecResults.length > 0) {
-        window.sessionStorage.setItem(CODEC_TEST_RESULTS_STORAGE_KEY, JSON.stringify(codecResults));
-      } else {
-        window.sessionStorage.removeItem(CODEC_TEST_RESULTS_STORAGE_KEY);
-      }
-    } catch {
-      // Ignore storage failures (private mode / denied storage)
-    }
-  }, [codecResults]);
-
   const [toggleStatsInput, setToggleStatsInput] = useState(settings.shortcutToggleStats);
   const [togglePointerLockInput, setTogglePointerLockInput] = useState(settings.shortcutTogglePointerLock);
   const [stopStreamInput, setStopStreamInput] = useState(settings.shortcutStopStream);
@@ -631,6 +419,9 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
   const [toggleAntiAfkError, setToggleAntiAfkError] = useState(false);
   const [toggleMicrophoneError, setToggleMicrophoneError] = useState(false);
   const [screenshotError, setScreenshotError] = useState(false);
+
+  const [keyboardLayoutDropdownOpen, setKeyboardLayoutDropdownOpen] = useState(false);
+  const keyboardLayoutDropdownRef = useRef<HTMLDivElement | null>(null);
 
   // Game language dropdown state
   const [gameLanguageDropdownOpen, setGameLanguageDropdownOpen] = useState(false);
@@ -734,7 +525,6 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
     [onSettingChange]
   );
 
-  /** Change color quality, auto-switching codec to H265 if the mode requires HEVC */
   const handleColorQualityChange = useCallback(
     (cq: ColorQuality) => {
       handleChange("colorQuality", cq);
@@ -762,40 +552,96 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
   const [microphoneDeviceDropdownOpen, setMicrophoneDeviceDropdownOpen] = useState(false);
   const microphoneModeDropdownRef = useRef<HTMLDivElement | null>(null);
   const microphoneDeviceDropdownRef = useRef<HTMLDivElement | null>(null);
+  const latestMicrophoneDeviceIdRef = useRef(settings.microphoneDeviceId);
+
+  useEffect(() => {
+    latestMicrophoneDeviceIdRef.current = settings.microphoneDeviceId;
+  }, [settings.microphoneDeviceId]);
 
   // Enumerate microphone devices when mic mode is enabled
   useEffect(() => {
     if (settings.microphoneMode === "disabled") {
       setMicrophoneDevices([]);
+      setMicrophonePermissionError(null);
       return;
     }
 
     let cancelled = false;
 
     async function enumerateDevices(): Promise<void> {
+      const applyDeviceList = (audioInputs: MediaDeviceInfo[]): void => {
+        if (cancelled) {
+          return;
+        }
+
+        setMicrophoneDevices(audioInputs);
+        setMicrophonePermissionError(null);
+
+        if (
+          latestMicrophoneDeviceIdRef.current
+          && !audioInputs.some((device) => device.deviceId === latestMicrophoneDeviceIdRef.current)
+        ) {
+          handleChange("microphoneDeviceId", "");
+        }
+      };
+
       try {
-        // Request permission first to get device labels
+        if (typeof window.openNow?.getMicrophonePermission === "function") {
+          const permission = await window.openNow.getMicrophonePermission();
+          if (cancelled) {
+            return;
+          }
+
+          if (permission.isMacOs && !permission.granted) {
+            setMicrophoneDevices([]);
+            setMicrophonePermissionError(getMicrophonePermissionError(permission));
+            return;
+          }
+        }
+
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        stream.getTracks().forEach(t => t.stop()); // Release the stream immediately
+        stream.getTracks().forEach((track) => track.stop());
 
         const devices = await navigator.mediaDevices.enumerateDevices();
-        if (!cancelled) {
-          const audioInputs = devices.filter(d => d.kind === "audioinput");
-          setMicrophoneDevices(audioInputs);
-          setMicrophonePermissionError(null);
-        }
+        applyDeviceList(devices.filter((device) => device.kind === "audioinput"));
       } catch (err) {
         console.error("[SettingsPage] Failed to enumerate microphone devices:", err);
+
+        try {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          if (cancelled) {
+            return;
+          }
+
+          const audioInputs = devices.filter((device) => device.kind === "audioinput");
+          if (audioInputs.length > 0) {
+            setMicrophoneDevices(audioInputs);
+            setMicrophonePermissionError("Microphone access is required to show device names and use voice chat. Allow access and try again.");
+            if (
+              latestMicrophoneDeviceIdRef.current
+              && !audioInputs.some((device) => device.deviceId === latestMicrophoneDeviceIdRef.current)
+            ) {
+              handleChange("microphoneDeviceId", "");
+            }
+            return;
+          }
+        } catch {
+          // Ignore secondary enumerate failure and fall through to stable error state.
+        }
+
         if (!cancelled) {
-          setMicrophonePermissionError("Microphone access denied. Please allow microphone permission in your system settings.");
+          const message = err instanceof DOMException && err.name === "NotAllowedError"
+            ? "Microphone access was denied. Allow access for OpenNOW and try again."
+            : "Unable to access microphone devices right now.";
+          setMicrophonePermissionError(message);
           setMicrophoneDevices([]);
         }
       }
     }
 
-    enumerateDevices();
+    void enumerateDevices();
     return () => { cancelled = true; };
-  }, [settings.microphoneMode]);
+  }, [handleChange, settings.microphoneMode]);
 
   const filteredRegions = useMemo(() => {
     const q = regionSearch.trim().toLowerCase();
@@ -843,6 +689,10 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
     return gameLanguageOptions.find((option) => option.value === settings.gameLanguage)?.label ?? "English (US)";
   }, [settings.gameLanguage]);
 
+  const selectedKeyboardLayoutName = useMemo(() => {
+    return keyboardLayoutOptions.find((option) => option.value === settings.keyboardLayout)?.label ?? "English (US)";
+  }, [settings.keyboardLayout]);
+
   useEffect(() => {
     if (settings.microphoneMode === "disabled") {
       setMicrophoneDeviceDropdownOpen(false);
@@ -857,6 +707,9 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
       }
       if (microphoneDeviceDropdownRef.current && !microphoneDeviceDropdownRef.current.contains(target)) {
         setMicrophoneDeviceDropdownOpen(false);
+      }
+      if (keyboardLayoutDropdownRef.current && !keyboardLayoutDropdownRef.current.contains(target)) {
+        setKeyboardLayoutDropdownOpen(false);
       }
       if (gameLanguageDropdownRef.current && !gameLanguageDropdownRef.current.contains(target)) {
         setGameLanguageDropdownOpen(false);
@@ -940,6 +793,219 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
     }
   }, [handleChange, settings]);
 
+  useEffect(() => {
+    thanksMountedRef.current = true;
+    return () => {
+      thanksMountedRef.current = false;
+      thanksRequestIdRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (activeTab !== "thanks") {
+      thanksRequestIdRef.current += 1;
+      setThanksLoadState((current) => (current === "loading" || current === "error" ? "idle" : current));
+      setThanksFetchError(null);
+      return;
+    }
+
+    if (thanksData || thanksLoadState !== "idle") {
+      return;
+    }
+
+    const requestId = ++thanksRequestIdRef.current;
+    let requestPromise: Promise<ThankYouDataResult>;
+
+    try {
+      const getThanksData = window.openNow?.getThanksData;
+      if (typeof getThanksData !== "function") {
+        throw new Error("openNow.getThanksData is unavailable");
+      }
+      requestPromise = getThanksData();
+    } catch (error) {
+      console.error("[SettingsPage] Failed to start thanks data request:", error);
+      setThanksData(null);
+      setThanksFetchError("Unable to load community acknowledgements right now.");
+      setThanksLoadState("error");
+      return;
+    }
+
+    setThanksLoadState("loading");
+    setThanksFetchError(null);
+
+    void requestPromise.then(
+      (data) => {
+        if (!thanksMountedRef.current || requestId !== thanksRequestIdRef.current) {
+          return;
+        }
+        setThanksData(data);
+        setThanksLoadState("loaded");
+      },
+      (error) => {
+        if (!thanksMountedRef.current || requestId !== thanksRequestIdRef.current) {
+          return;
+        }
+        setThanksData(null);
+        setThanksFetchError("Unable to load community acknowledgements right now.");
+        setThanksLoadState("error");
+      },
+    );
+  }, [activeTab, thanksData, thanksLoadState]);
+
+  const renderPersonLink = useCallback((person: ThankYouContributor | ThankYouSupporter, content: JSX.Element) => {
+    if (!person.profileUrl) {
+      return <div className="settings-person-card">{content}</div>;
+    }
+
+    return (
+      <a className="settings-person-card settings-person-card--link" href={person.profileUrl} target="_blank" rel="noreferrer">
+        {content}
+      </a>
+    );
+  }, []);
+
+  const thanksContributors = thanksData?.contributors ?? [];
+  const thanksSupporters = thanksData?.supporters ?? [];
+  const hasThanksError = Boolean(thanksFetchError || thanksData?.contributorsError || thanksData?.supportersError);
+
+  const handleRetryThanks = useCallback(() => {
+    thanksRequestIdRef.current += 1;
+    setThanksData(null);
+    setThanksFetchError(null);
+    setThanksLoadState("idle");
+  }, []);
+
+  const renderContributorCard = useCallback((contributor: ThankYouContributor) => {
+    return renderPersonLink(
+      contributor,
+      <>
+        <img className="settings-person-avatar" src={contributor.avatarUrl} alt={contributor.login} loading="lazy" />
+        <div className="settings-person-body">
+          <div className="settings-person-title-row">
+            <span className="settings-person-name">{contributor.login}</span>
+            <span className="settings-person-badge">Contributor</span>
+          </div>
+          <div className="settings-person-meta">
+            <span>{contributor.contributions} contribution{contributor.contributions === 1 ? "" : "s"}</span>
+            <ExternalLink size={14} />
+          </div>
+        </div>
+      </>,
+    );
+  }, [renderPersonLink]);
+
+  const renderSupporterCard = useCallback((supporter: ThankYouSupporter) => {
+    return renderPersonLink(
+      supporter,
+      <>
+        <div className={`settings-person-avatar settings-person-avatar--fallback ${supporter.avatarUrl ? "" : "is-placeholder"}`.trim()}>
+          {supporter.avatarUrl ? (
+            <img className="settings-person-avatar" src={supporter.avatarUrl} alt={supporter.name} loading="lazy" />
+          ) : (
+            <Heart size={18} />
+          )}
+        </div>
+        <div className="settings-person-body">
+          <div className="settings-person-title-row">
+            <span className="settings-person-name">{supporter.name || "Private"}</span>
+            <span className="settings-person-badge settings-person-badge--supporter">Supporter</span>
+          </div>
+          <div className="settings-person-meta">
+            <span>{supporter.isPrivate ? "Private sponsor" : "GitHub Sponsors"}</span>
+            {supporter.profileUrl && <ExternalLink size={14} />}
+          </div>
+        </div>
+      </>,
+    );
+  }, [renderPersonLink]);
+
+  const thanksTabContent = (
+    <div className="settings-thanks-layout">
+      <section className="settings-section settings-thanks-hero">
+        <div className="settings-thanks-hero-icon">
+          <Heart size={18} />
+        </div>
+        <div className="settings-thanks-hero-copy">
+          <h2>Thanks for helping OpenNOW grow</h2>
+          <p>OpenNOW is shaped by contributors building the client and supporters backing the project behind the scenes.</p>
+        </div>
+      </section>
+
+      {thanksFetchError && (
+        <section className="settings-section settings-thanks-status settings-thanks-status--error">
+          <strong>Community data unavailable</strong>
+          <span>{thanksFetchError}</span>
+          <div className="settings-thanks-actions">
+            <button type="button" className="settings-chip settings-thanks-retry-btn" onClick={handleRetryThanks}>
+              Retry
+            </button>
+          </div>
+        </section>
+      )}
+
+      <div className="settings-thanks-grid">
+        <section className="settings-section">
+          <div className="settings-section-header settings-section-header--thanks">
+            <Users size={18} />
+            <div>
+              <h2>Contributors</h2>
+              <p className="settings-section-subtitle">People improving OpenNOW in code, fixes, and features.</p>
+            </div>
+          </div>
+          {thanksLoadState === "loading" && !thanksData ? (
+            <div className="settings-thanks-state">
+              <Loader size={16} className="settings-loading-icon" />
+              <span>Loading contributors from GitHub…</span>
+            </div>
+          ) : thanksContributors.length > 0 ? (
+            <div className="settings-people-grid">
+              {thanksContributors.map((contributor) => (
+                <div key={contributor.login}>{renderContributorCard(contributor)}</div>
+              ))}
+            </div>
+          ) : (
+            <div className="settings-thanks-state settings-thanks-state--muted">
+              <span>{thanksData?.contributorsError ?? "No contributors could be shown right now."}</span>
+            </div>
+          )}
+        </section>
+
+        <section className="settings-section">
+          <div className="settings-section-header settings-section-header--thanks">
+            <Heart size={18} />
+            <div>
+              <h2>Supporters</h2>
+              <p className="settings-section-subtitle">Public GitHub Sponsors backing the work, plus private supporters when available.</p>
+            </div>
+          </div>
+          {thanksLoadState === "loading" && !thanksData ? (
+            <div className="settings-thanks-state">
+              <Loader size={16} className="settings-loading-icon" />
+              <span>Loading supporters from GitHub Sponsors…</span>
+            </div>
+          ) : thanksSupporters.length > 0 ? (
+            <div className="settings-people-grid">
+              {thanksSupporters.map((supporter, index) => (
+                <div key={`${supporter.name}-${supporter.profileUrl ?? index}`}>{renderSupporterCard(supporter)}</div>
+              ))}
+            </div>
+          ) : (
+            <div className="settings-thanks-state settings-thanks-state--muted">
+              <span>{thanksData?.supportersError ?? "No supporters could be shown right now."}</span>
+            </div>
+          )}
+        </section>
+      </div>
+
+      {hasThanksError && thanksData && (
+        <section className="settings-section settings-thanks-status">
+          {thanksData.contributorsError && <span>Contributors: {thanksData.contributorsError}</span>}
+          {thanksData.supportersError && <span>Supporters: {thanksData.supportersError}</span>}
+        </section>
+      )}
+    </div>
+  );
+
   return (
     <div className="settings-page">
       <header className="settings-header">
@@ -950,8 +1016,30 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
         </div>
       </header>
 
-      <div className="settings-sections">
-        {/* ── Region ────────────────────────────────────── */}
+      <div className="settings-tab-row settings-chip-row" role="tablist" aria-label="Settings sections">
+        <button
+          type="button"
+          className={`settings-chip settings-tab-chip ${activeTab === "preferences" ? "active" : ""}`}
+          onClick={() => setActiveTab("preferences")}
+          role="tab"
+          aria-selected={activeTab === "preferences"}
+        >
+          Preferences
+        </button>
+        <button
+          type="button"
+          className={`settings-chip settings-tab-chip ${activeTab === "thanks" ? "active" : ""}`}
+          onClick={() => setActiveTab("thanks")}
+          role="tab"
+          aria-selected={activeTab === "thanks"}
+        >
+          Thanks
+        </button>
+      </div>
+
+      {activeTab === "preferences" ? (
+        <div className="settings-sections">
+          {/* ── Region ────────────────────────────────────── */}
         <section className="settings-section">
           <div className="settings-section-header">
             <h2>Region</h2>
@@ -1256,16 +1344,58 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
             <div className="settings-row">
               <label className="settings-label">Codec</label>
               <div className="settings-chip-row">
-                {codecOptions.map((codec) => (
+                {codecOptions.map((codec) => {
+                  const badgeState = getCodecDecodeBadgeState(codec, codecResults, codecTesting);
+                  return (
+                    <button
+                      key={codec}
+                      className={`settings-chip settings-chip--codec ${settings.codec === codec ? "active" : ""}`}
+                      onClick={() => handleCodecChange(codec)}
+                    >
+                      <span>{codec}</span>
+                      {badgeState && (
+                        <span
+                          className={`settings-inline-badge settings-inline-badge--codec settings-inline-badge--codec-${badgeState}`}
+                        >
+                          {badgeState === "gpu" ? "GPU" : badgeState === "cpu" ? "CPU" : "Testing…"}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="settings-row settings-row--column">
+              <label className="settings-label">Decoder</label>
+              <div className="settings-chip-row">
+                {accelerationOptions.map((option) => (
                   <button
-                    key={codec}
-                    className={`settings-chip ${settings.codec === codec ? "active" : ""}`}
-                    onClick={() => handleCodecChange(codec)}
+                    key={`decoder-${option.value}`}
+                    className={`settings-chip ${settings.decoderPreference === option.value ? "active" : ""}`}
+                    onClick={() => handleChange("decoderPreference", option.value)}
                   >
-                    {codec}
+                    {option.label}
                   </button>
                 ))}
               </div>
+              <span className="settings-subtle-hint">Applies after app restart.</span>
+            </div>
+
+            <div className="settings-row settings-row--column">
+              <label className="settings-label">Encoder</label>
+              <div className="settings-chip-row">
+                {accelerationOptions.map((option) => (
+                  <button
+                    key={`encoder-${option.value}`}
+                    className={`settings-chip ${settings.encoderPreference === option.value ? "active" : ""}`}
+                    onClick={() => handleChange("encoderPreference", option.value)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+              <span className="settings-subtle-hint">Applies after app restart.</span>
             </div>
 
             {/* Color Quality */}
@@ -1345,7 +1475,9 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
               </label>
               <button
                 className="codec-test-btn"
-                onClick={runCodecTest}
+                onClick={() => {
+                  void onRunCodecTest();
+                }}
                 disabled={codecTesting}
                 type="button"
               >
@@ -1552,6 +1684,43 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
                 />
                 <span className="settings-toggle-track" />
               </label>
+            </div>
+
+            <div className="settings-row settings-row--top-aligned">
+              <label className="settings-label settings-label--wrap">
+                Keyboard Layout
+                <span className="settings-hint">Controls how your physical keyboard is mapped inside the remote session. Separate from the in-game language setting.</span>
+              </label>
+              <div className="settings-dropdown settings-dropdown--constrained" ref={keyboardLayoutDropdownRef}>
+                <button
+                  type="button"
+                  className={`settings-dropdown-selected ${keyboardLayoutDropdownOpen ? "open" : ""}`}
+                  onClick={() => setKeyboardLayoutDropdownOpen((open) => !open)}
+                >
+                  <span className="settings-dropdown-selected-name">{selectedKeyboardLayoutName}</span>
+                  <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" className={`settings-dropdown-chevron ${keyboardLayoutDropdownOpen ? "flipped" : ""}`}>
+                    <path d="M4.47 5.97a.75.75 0 0 1 1.06 0L8 8.44l2.47-2.47a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 0 1 0-1.06Z" />
+                  </svg>
+                </button>
+                {keyboardLayoutDropdownOpen && (
+                  <div className="settings-dropdown-menu settings-dropdown-menu--tall">
+                    {keyboardLayoutOptions.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        className={`settings-dropdown-item ${settings.keyboardLayout === option.value ? "active" : ""}`}
+                        onClick={() => {
+                          handleChange("keyboardLayout", option.value);
+                          setKeyboardLayoutDropdownOpen(false);
+                        }}
+                      >
+                        <span>{option.label}</span>
+                        {settings.keyboardLayout === option.value && <Check size={14} className="settings-dropdown-check" />}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Mouse Sensitivity */}
@@ -1770,6 +1939,21 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
 
             <div className="settings-row">
               <label className="settings-label">
+                Show Stats on Stream Launch
+                <span className="settings-hint">Automatically show the stats overlay when a new stream starts.</span>
+              </label>
+              <label className="settings-toggle">
+                <input
+                  type="checkbox"
+                  checked={settings.showStatsOnLaunch}
+                  onChange={(e) => handleChange("showStatsOnLaunch", e.target.checked)}
+                />
+                <span className="settings-toggle-track" />
+              </label>
+            </div>
+
+            <div className="settings-row">
+              <label className="settings-label">
                 <span className="settings-label-title">
                   Controller Mode Library
                   <span className="settings-inline-badge settings-inline-badge--beta">Beta</span>
@@ -1847,13 +2031,30 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
               </div>
             )}
 
+            <div className="settings-row">
+              <label className="settings-label">
+                Session Elapsed Counter
+                <span className="settings-hint">Enable or disable the live session elapsed counter while streaming.</span>
+              </label>
+              <label className="settings-toggle">
+                <input
+                  type="checkbox"
+                  checked={settings.sessionCounterEnabled}
+                  onChange={(e) => handleChange("sessionCounterEnabled", e.target.checked)}
+                />
+                <span className="settings-toggle-track" />
+              </label>
+            </div>
+
             <div className="settings-row settings-row--column">
               <div className="settings-row-top">
                 <label className="settings-label">Session Timer Reappear</label>
                 <span className="settings-value-badge">
-                  {settings.sessionClockShowEveryMinutes === 0
-                    ? "Off"
-                    : `Every ${settings.sessionClockShowEveryMinutes} min`}
+                  {!settings.sessionCounterEnabled
+                    ? "Disabled"
+                    : settings.sessionClockShowEveryMinutes === 0
+                      ? "Off"
+                      : `Every ${settings.sessionClockShowEveryMinutes} min`}
                 </span>
               </div>
               <input
@@ -1864,6 +2065,7 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
                 step={5}
                 value={settings.sessionClockShowEveryMinutes}
                 onChange={(e) => handleChange("sessionClockShowEveryMinutes", parseInt(e.target.value, 10))}
+                disabled={!settings.sessionCounterEnabled}
               />
               <span className="settings-subtle-hint">
                 How often the session timer pops back up while streaming (0 disables repeats).
@@ -1873,7 +2075,9 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
             <div className="settings-row settings-row--column">
               <div className="settings-row-top">
                 <label className="settings-label">Session Timer Visible Time</label>
-                <span className="settings-value-badge">{settings.sessionClockShowDurationSeconds}s</span>
+                <span className="settings-value-badge">
+                  {settings.sessionCounterEnabled ? `${settings.sessionClockShowDurationSeconds}s` : "Disabled"}
+                </span>
               </div>
               <input
                 type="range"
@@ -1883,9 +2087,16 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
                 step={5}
                 value={settings.sessionClockShowDurationSeconds}
                 onChange={(e) => handleChange("sessionClockShowDurationSeconds", parseInt(e.target.value, 10))}
+                disabled={!settings.sessionCounterEnabled}
               />
               <span className="settings-subtle-hint">
                 How long the session timer stays visible each time it appears.
+              </span>
+            </div>
+
+            <div className="settings-row settings-row--column">
+              <span className="settings-subtle-hint">
+                Disabling the session elapsed counter stops the live elapsed timer from rendering at all. Remaining playtime indicators stay unchanged.
               </span>
             </div>
           </div>
@@ -1956,7 +2167,12 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
             </div>
           </div>
         </section>
-      </div>
+        </div>
+
+      ) : (
+        thanksTabContent
+      )}
+
 
     </div>
   );
