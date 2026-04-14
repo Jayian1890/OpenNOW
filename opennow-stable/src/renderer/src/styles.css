@@ -1,6 +1,7 @@
 /* ---------- Design Tokens ---------- */
 :root {
   color-scheme: dark;
+  --game-poster-scale: 1;
 
   /* Backgrounds — layered obsidian-charcoal */
   --bg-a: #0a0a0c;
@@ -1373,12 +1374,12 @@ body.controller-mode.controller-hide-cursor * {
   overflow: hidden;
 }
 
-/* Toolbar: tabs | search | count */
 .home-toolbar {
   display: flex;
   align-items: center;
   gap: 12px;
   flex-shrink: 0;
+  flex-wrap: wrap;
 }
 
 .home-tabs {
@@ -1426,6 +1427,7 @@ body.controller-mode.controller-hide-cursor * {
 .home-search {
   flex: 1;
   position: relative;
+  min-width: 260px;
   max-width: 340px;
 }
 
@@ -1460,6 +1462,47 @@ body.controller-mode.controller-hide-cursor * {
   box-shadow: 0 0 0 2px var(--accent-surface);
 }
 
+.home-sort,
+.library-sort,
+.home-filter-dropdown-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  height: 34px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--panel-border);
+  background: var(--card);
+  color: var(--ink-muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  transition: border-color var(--t-fast), background var(--t-fast), color var(--t-fast);
+}
+
+.home-sort:hover,
+.library-sort:hover,
+.home-filter-dropdown-trigger:hover {
+  color: var(--ink-soft);
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.home-sort:focus-within,
+.library-sort:focus-within,
+.home-filter-dropdown-trigger:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-surface);
+}
+
+.home-sort select,
+.library-sort select {
+  border: none;
+  background: transparent;
+  color: currentColor;
+  font: inherit;
+  outline: none;
+}
+
 .home-count {
   font-size: 0.78rem;
   color: var(--ink-muted);
@@ -1468,7 +1511,117 @@ body.controller-mode.controller-hide-cursor * {
   margin-left: auto;
 }
 
-/* Grid area */
+.home-filter-dropdown {
+  position: relative;
+}
+
+.home-filter-dropdown[open] {
+  z-index: 5;
+}
+
+.home-filter-dropdown-trigger {
+  list-style: none;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.home-filter-dropdown-trigger::-webkit-details-marker {
+  display: none;
+}
+
+.home-filter-dropdown-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.home-filter-dropdown-count {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--r-full);
+  background: var(--accent);
+  color: var(--accent-on);
+  font-size: 0.7rem;
+  line-height: 18px;
+  text-align: center;
+}
+
+.home-filter-dropdown-chevron {
+  transition: transform var(--t-fast);
+}
+
+.home-filter-dropdown[open] .home-filter-dropdown-chevron {
+  transform: rotate(180deg);
+}
+
+.home-filter-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  min-width: 320px;
+  max-width: 440px;
+  padding: 12px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--panel-border);
+  background: var(--card);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.home-filter-dropdown-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.home-filter-group-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--ink-muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.home-filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.home-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 10px;
+  border-radius: var(--r-full);
+  border: 1px solid var(--panel-border);
+  background: var(--chip);
+  color: var(--ink-muted);
+  font-size: 0.76rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: color var(--t-fast), background var(--t-fast), border-color var(--t-fast);
+}
+
+.home-filter-chip:hover {
+  color: var(--ink-soft);
+  background: var(--panel-border-solid);
+}
+
+.home-filter-chip.active {
+  color: var(--accent-on);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
 .home-grid-area {
   flex: 1;
   overflow-y: auto;
@@ -1477,7 +1630,6 @@ body.controller-mode.controller-hide-cursor * {
   will-change: scroll-position;
 }
 
-/* Empty / Loading states */
 .home-empty-state {
   display: flex;
   flex-direction: column;
@@ -1511,245 +1663,6 @@ body.controller-mode.controller-hide-cursor * {
   color: var(--accent);
 }
 
-
-/* ======================================================
-   GAME GRID  (shared by Home + Library)
-   ====================================================== */
-.game-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 12px;
-  padding-bottom: 16px;
-}
-
-@media (min-width: 1600px) {
-  .game-grid {
-    grid-template-columns: repeat(6, 1fr);
-  }
-}
-
-@media (min-width: 1280px) and (max-width: 1599px) {
-  .game-grid {
-    grid-template-columns: repeat(5, 1fr);
-  }
-}
-
-@media (min-width: 1024px) and (max-width: 1279px) {
-  .game-grid {
-    grid-template-columns: repeat(4, 1fr);
-  }
-}
-
-@media (min-width: 768px) and (max-width: 1023px) {
-  .game-grid {
-    grid-template-columns: repeat(3, 1fr);
-  }
-}
-
-@media (max-width: 767px) {
-  .game-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
-
-
-/* ======================================================
-   GAME CARD
-   ====================================================== */
-.game-card {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  background: var(--card);
-  border: 1px solid var(--panel-border);
-  border-radius: var(--r-md);
-  overflow: hidden;
-  cursor: pointer;
-  transition: transform var(--t-normal), border-color var(--t-normal);
-  contain: layout style;
-  transform: translateZ(0);
-  backface-visibility: hidden;
-  will-change: transform;
-}
-
-.game-card::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  opacity: 0;
-  transition: opacity var(--t-normal);
-  background: radial-gradient(120% 70% at 50% 0%, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0) 70%);
-}
-
-.game-card:hover {
-  transform: translateY(-2px) scale(1.01);
-  border-color: rgba(255, 255, 255, 0.1);
-}
-
-.game-card:hover::after {
-  opacity: 1;
-}
-
-.game-card.selected {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent-glow);
-}
-
-/* Image wrapper — 16:9 landscape for GFN cover art */
-.game-card-image-wrapper {
-  position: relative;
-  aspect-ratio: 16 / 9;
-  overflow: hidden;
-  background: var(--bg-c);
-  backface-visibility: hidden;
-}
-
-.game-card-image {
-  width: calc(100% + 2px);
-  height: calc(100% + 2px);
-  margin: -1px;
-  object-fit: cover;
-  transition: transform var(--t-normal);
-}
-
-.game-card:hover .game-card-image {
-  transform: scale(1.03);
-}
-
-.game-card-image-placeholder {
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: linear-gradient(135deg, var(--bg-c), var(--panel));
-  color: var(--ink-muted);
-}
-
-/* Play overlay */
-.game-card-overlay {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  opacity: 0;
-  transition: opacity var(--t-normal);
-}
-
-.game-card:hover .game-card-overlay {
-  opacity: 1;
-}
-
-.game-card-gradient {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(to bottom, transparent 20%, rgba(10, 10, 12, 0.8) 100%);
-}
-
-.game-card-play-button {
-  position: relative;
-  z-index: 1;
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
-  background: var(--accent);
-  border: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: transform var(--t-fast), background var(--t-fast);
-  box-shadow: 0 4px 16px var(--accent-glow);
-  color: var(--accent-on);
-}
-
-.game-card-play-button:hover {
-  transform: scale(1.1);
-  background: var(--accent-press);
-}
-
-/* Card info (bottom section) */
-.game-card-info {
-  padding: 10px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.game-card-title {
-  margin: 0;
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: var(--ink);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  line-height: 1.3;
-}
-
-.game-card-platform {
-  margin: 0;
-  font-size: 0.72rem;
-  font-weight: 500;
-  color: var(--ink-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  line-height: 1.2;
-}
-
-/* Store icon chips */
-.game-card-stores {
-  display: flex;
-  gap: 3px;
-  flex-wrap: wrap;
-}
-
-.game-card-store-chip {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  background: var(--chip);
-  border: none;
-  padding: 0;
-  border-radius: 4px;
-  color: var(--ink-muted);
-  transition: color var(--t-fast), background var(--t-fast);
-}
-
-button.game-card-store-chip {
-  cursor: pointer;
-}
-
-.game-card-store-chip:hover {
-  color: var(--ink-soft);
-  background: var(--panel-border-solid);
-}
-
-.game-card-store-chip.active {
-  color: var(--accent-on);
-  background: var(--accent);
-}
-
-button.game-card-store-chip.active:hover {
-  background: var(--accent-press);
-}
-
-.game-card-store-chip:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
-.store-svg {
-  display: block;
-  flex-shrink: 0;
-}
-
-
 /* ======================================================
    LIBRARY PAGE
    ====================================================== */
@@ -1768,6 +1681,7 @@ button.game-card-store-chip.active:hover {
   align-items: center;
   gap: 12px;
   flex-shrink: 0;
+  flex-wrap: wrap;
 }
 
 .library-title {
@@ -1791,6 +1705,7 @@ button.game-card-store-chip.active:hover {
 .library-search {
   flex: 1;
   position: relative;
+  min-width: 260px;
   max-width: 340px;
 }
 
@@ -1890,6 +1805,233 @@ button.game-card-store-chip.active:hover {
   color: var(--accent);
 }
 
+/* ======================================================
+   GAME GRID  (shared by Home + Library)
+   ====================================================== */
+.game-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(calc(200px * var(--game-poster-scale, 1)), 1fr));
+  gap: 12px;
+  padding-bottom: 16px;
+}
+
+
+/* ======================================================
+   GAME CARD
+   ====================================================== */
+.game-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: var(--card);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform var(--t-normal), border-color var(--t-normal);
+  contain: layout style;
+  transform: translateZ(0);
+  backface-visibility: hidden;
+  will-change: transform;
+}
+
+.game-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--t-normal);
+  background: radial-gradient(120% 70% at 50% 0%, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0) 70%);
+}
+
+.game-card:hover {
+  transform: translateY(-2px) scale(1.01);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.game-card:hover::after {
+  opacity: 1;
+}
+
+.game-card.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-glow);
+}
+
+/* Image wrapper — portrait poster art */
+.game-card-image-wrapper {
+  position: relative;
+  aspect-ratio: 2 / 3;
+  overflow: hidden;
+  background: var(--bg-c);
+  backface-visibility: hidden;
+  flex: 1;
+}
+
+.game-card-image {
+  width: calc(100% + 2px);
+  height: calc(100% + 2px);
+  margin: -1px;
+  object-fit: cover;
+  transition: transform var(--t-normal);
+}
+
+.game-card:hover .game-card-image {
+  transform: scale(1.03);
+}
+
+.game-card-image-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, var(--bg-c), var(--panel));
+  color: var(--ink-muted);
+}
+
+/* Play overlay */
+.game-card-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity var(--t-normal);
+}
+
+.game-card:hover .game-card-overlay {
+  opacity: 1;
+}
+
+.game-card-gradient {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to bottom, transparent 30%, rgba(10, 10, 12, 0.72) 60%, rgba(10, 10, 12, 0.92) 100%);
+}
+
+.game-card-play-button {
+  position: relative;
+  z-index: 1;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: transform var(--t-fast), background var(--t-fast);
+  box-shadow: 0 4px 16px var(--accent-glow);
+  color: var(--accent-on);
+}
+
+.game-card-play-button:hover {
+  transform: scale(1.1);
+  background: var(--accent-press);
+}
+
+/* Card info — overlaid at the bottom of the poster */
+.game-card-info {
+  position: absolute;
+  inset: auto 0 0 0;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.game-card-info::before {
+  content: "";
+  position: absolute;
+  inset: -80px 0 0 0;
+  background: linear-gradient(to bottom, transparent 0%, rgba(6, 8, 7, 0.6) 50%, rgba(6, 8, 7, 0.88) 100%);
+  pointer-events: none;
+  z-index: -1;
+}
+
+.game-card-info .game-card-stores {
+  pointer-events: auto;
+}
+
+.game-card-title {
+  margin: 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.3;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+}
+
+.game-card-platform {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.65);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.2;
+}
+
+/* Store icon chips */
+.game-card-stores {
+  display: flex;
+  gap: 3px;
+  flex-wrap: wrap;
+}
+
+.game-card-store-chip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  background: var(--chip);
+  border: none;
+  padding: 0;
+  border-radius: 4px;
+  color: var(--ink-muted);
+  transition: color var(--t-fast), background var(--t-fast);
+}
+
+button.game-card-store-chip {
+  cursor: pointer;
+}
+
+.game-card-store-chip:hover {
+  color: var(--ink-soft);
+  background: var(--panel-border-solid);
+}
+
+.game-card-store-chip.active {
+  color: var(--accent-on);
+  background: var(--accent);
+}
+
+button.game-card-store-chip.active:hover {
+  background: var(--accent-press);
+}
+
+.game-card-store-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.store-svg {
+  display: block;
+  flex-shrink: 0;
+}
+
+
 .controller-selected-overlay {
   position: absolute;
   inset: auto 12px 12px 12px;
@@ -1904,7 +2046,7 @@ button.game-card-store-chip.active:hover {
    SETTINGS PAGE
    ====================================================== */
 .settings-page {
-  max-width: 760px;
+  max-width: 980px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
@@ -2178,6 +2320,231 @@ button.game-card-store-chip.active:hover {
   gap: 14px;
 }
 
+/* ── Settings two-panel layout ───────────────────────── */
+.settings-layout {
+  display: flex;
+  gap: 0;
+  min-height: 0;
+  flex: 1;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+
+.settings-sidebar {
+  width: 188px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  background: var(--bg-a);
+  border-right: 1px solid var(--panel-border);
+  padding: 10px 8px;
+}
+
+.settings-search-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  background: var(--chip);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+
+.settings-search-icon {
+  color: var(--ink-muted);
+  flex-shrink: 0;
+}
+
+.settings-search-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--ink);
+  font-size: 0.82rem;
+  font-family: inherit;
+  min-width: 0;
+}
+
+.settings-search-input::placeholder {
+  color: var(--ink-muted);
+}
+
+.settings-search-clear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--ink-muted);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 3px;
+  transition: color var(--t-fast);
+}
+
+.settings-search-clear:hover {
+  color: var(--ink);
+}
+
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 12px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 0.88rem;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--t-fast), color var(--t-fast);
+  white-space: nowrap;
+}
+
+.settings-nav-item svg {
+  flex-shrink: 0;
+  color: var(--ink-muted);
+  transition: color var(--t-fast);
+}
+
+.settings-nav-item:hover {
+  background: var(--chip);
+  color: var(--ink);
+}
+
+.settings-nav-item:hover svg {
+  color: var(--ink-soft);
+}
+
+.settings-nav-item.active {
+  background: var(--accent-surface);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.settings-nav-item.active svg {
+  color: var(--accent);
+}
+
+.settings-content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* Advanced disclosure */
+.settings-advanced-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-advanced-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  background: var(--bg-a);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--r-sm);
+  color: var(--ink-soft);
+  font-size: 0.83rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: color var(--t-fast), border-color var(--t-fast), background var(--t-fast);
+}
+
+.settings-advanced-toggle:hover {
+  color: var(--ink);
+  border-color: rgba(255,255,255,0.1);
+  background: var(--chip);
+}
+
+.settings-advanced-chevron {
+  margin-left: auto;
+  color: var(--ink-muted);
+  transition: transform var(--t-fast);
+}
+
+.settings-advanced-chevron.flipped {
+  transform: rotate(180deg);
+}
+
+/* Resolution grouped dropdown */
+.settings-dropdown-menu--grouped {
+  max-height: 300px;
+}
+
+.settings-dropdown-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-dropdown-group-label {
+  padding: 8px 14px 4px;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  background: rgba(255,255,255,0.03);
+  border-top: 1px solid var(--panel-border);
+}
+
+.settings-dropdown-group:first-child .settings-dropdown-group-label {
+  border-top: none;
+}
+
+/* Toggle two-column grid */
+.settings-toggle-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 16px;
+}
+
+.settings-toggle-grid .settings-row {
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px;
+  background: var(--chip);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+}
+
+.settings-toggle-grid .settings-label {
+  flex-shrink: 1;
+}
+
+/* Search result context label */
+.settings-section-context {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+
 .settings-section {
   background: var(--card);
   border: 1px solid var(--panel-border);
@@ -2415,14 +2782,15 @@ button.game-card-store-chip.active:hover {
 
 .settings-shortcut-grid {
   display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 8px;
 }
 
 .settings-shortcut-row {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
 }
 
 .settings-shortcut-label {
@@ -2431,8 +2799,13 @@ button.game-card-store-chip.active:hover {
 }
 
 .settings-shortcut-input {
-  min-width: 185px;
-  text-align: right;
+  min-width: unset;
+  width: 100%;
+  text-align: left;
+}
+
+.settings-shortcut-input[readonly]:not(.settings-shortcut-input--static) {
+  cursor: pointer;
 }
 
 .settings-shortcut-input--static {
@@ -6035,8 +6408,9 @@ button.game-card-store-chip.active:hover {
 }
 
 .xmb-game-poster-container {
-  width: 56px;
-  height: 80px;
+  width: calc(56px * var(--game-poster-scale, 1));
+  aspect-ratio: 2 / 3;
+  height: auto;
   border-radius: 8px;
   overflow: hidden;
   margin-right: 24px;
@@ -6218,7 +6592,7 @@ button.game-card-store-chip.active:hover {
 }
 
 .xmb-current-poster {
-  width: min(100%, 250px);
+  width: min(100%, calc(250px * var(--game-poster-scale, 1)));
   border-radius: 20px;
   overflow: hidden;
   border: 1px solid rgba(234, 255, 241, 0.16);

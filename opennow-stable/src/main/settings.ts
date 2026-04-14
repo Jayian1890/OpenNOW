@@ -9,6 +9,8 @@ export interface Settings {
   resolution: string;
   /** Aspect ratio (16:9, 16:10, 21:9, 32:9) */
   aspectRatio: AspectRatio;
+  /** Game poster size multiplier used by the renderer */
+  posterSizeScale: number;
   /** Target FPS (30, 60, 120, etc.) */
   fps: number;
   /** Maximum bitrate in Mbps (cap at 150) */
@@ -78,6 +80,10 @@ export interface Settings {
   gameLanguage: GameLanguage;
   /** Experimental request for Low Latency, Low Loss, Scalable throughput on new sessions */
   enableL4S: boolean;
+  /** Request Cloud G-Sync / Variable Refresh Rate on new sessions */
+  enableCloudGsync: boolean;
+  /** Show the currently streaming game as Discord Rich Presence activity */
+  discordRichPresence: boolean;
 }
 
 const defaultStopShortcut = "Ctrl+Shift+Q";
@@ -90,6 +96,7 @@ const DEFAULT_STREAM_PREFERENCES = getDefaultStreamPreferences();
 const DEFAULT_SETTINGS: Settings = {
   resolution: "1920x1080",
   aspectRatio: "16:9",
+  posterSizeScale: 1,
   fps: 60,
   maxBitrateMbps: 75,
   codec: DEFAULT_STREAM_PREFERENCES.codec,
@@ -125,6 +132,8 @@ const DEFAULT_SETTINGS: Settings = {
   keyboardLayout: DEFAULT_KEYBOARD_LAYOUT,
   gameLanguage: "en_US",
   enableL4S: false,
+  enableCloudGsync: false,
+  discordRichPresence: false,
 };
 
 export class SettingsManager {

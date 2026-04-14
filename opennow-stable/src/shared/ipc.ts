@@ -8,6 +8,7 @@ export const IPC_CHANNELS = {
   SUBSCRIPTION_FETCH: "subscription:fetch",
   GAMES_FETCH_MAIN: "games:fetch-main",
   GAMES_FETCH_LIBRARY: "games:fetch-library",
+  GAMES_BROWSE_CATALOG: "games:browse-catalog",
   GAMES_FETCH_PUBLIC: "games:fetch-public",
   GAMES_RESOLVE_LAUNCH_ID: "games:resolve-launch-id",
   CREATE_SESSION: "gfn:create-session",
@@ -52,6 +53,9 @@ export const IPC_CHANNELS = {
   MEDIA_LIST_BY_GAME: "media:list-by-game",
   MEDIA_THUMBNAIL: "media:thumbnail",
   MEDIA_SHOW_IN_FOLDER: "media:show-in-folder",
+  // PrintedWaste queue integration
+  PRINTEDWASTE_QUEUE_FETCH: "printedwaste:queue-fetch",
+  PRINTEDWASTE_SERVER_MAPPING_FETCH: "printedwaste:server-mapping-fetch",
 } as const;
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS];

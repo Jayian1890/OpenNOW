@@ -5,6 +5,7 @@ import type {
   AuthLoginRequest,
   AuthSessionRequest,
   GamesFetchRequest,
+  CatalogBrowseRequest,
   ResolveLaunchIdRequest,
   RegionsFetchRequest,
   MainToRendererSignalingEvent,
@@ -32,6 +33,8 @@ import type {
   RecordingEntry,
   RecordingDeleteRequest,
   MediaListingResult,
+  PrintedWasteQueueData,
+  PrintedWasteServerMapping,
   ThankYouDataResult,
 } from "@shared/gfn";
 import { parseSerializedSessionErrorTransport } from "@shared/sessionError";
@@ -64,6 +67,7 @@ const api: OpenNowApi = {
   fetchMainGames: (input: GamesFetchRequest) => ipcRenderer.invoke(IPC_CHANNELS.GAMES_FETCH_MAIN, input),
   fetchLibraryGames: (input: GamesFetchRequest) =>
     ipcRenderer.invoke(IPC_CHANNELS.GAMES_FETCH_LIBRARY, input),
+  browseCatalog: (input: CatalogBrowseRequest) => ipcRenderer.invoke(IPC_CHANNELS.GAMES_BROWSE_CATALOG, input),
   fetchPublicGames: () => ipcRenderer.invoke(IPC_CHANNELS.GAMES_FETCH_PUBLIC),
   resolveLaunchAppId: (input: ResolveLaunchIdRequest) =>
     ipcRenderer.invoke(IPC_CHANNELS.GAMES_RESOLVE_LAUNCH_ID, input),
@@ -143,6 +147,10 @@ const api: OpenNowApi = {
     ipcRenderer.invoke(IPC_CHANNELS.MEDIA_SHOW_IN_FOLDER, input),
   deleteCache: (): Promise<void> =>
     ipcRenderer.invoke(IPC_CHANNELS.CACHE_DELETE_ALL),
+  fetchPrintedWasteQueue: (): Promise<PrintedWasteQueueData> =>
+    ipcRenderer.invoke(IPC_CHANNELS.PRINTEDWASTE_QUEUE_FETCH),
+  fetchPrintedWasteServerMapping: (): Promise<PrintedWasteServerMapping> =>
+    ipcRenderer.invoke(IPC_CHANNELS.PRINTEDWASTE_SERVER_MAPPING_FETCH),
   getThanksData: (): Promise<ThankYouDataResult> => ipcRenderer.invoke(IPC_CHANNELS.COMMUNITY_GET_THANKS),
 };
 

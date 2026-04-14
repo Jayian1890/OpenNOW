@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { JSX } from "react";
+import type { CSSProperties, JSX } from "react";
 
 import type {
   ActiveSessionInfo,
   AuthSession,
   AuthUser,
+  CatalogBrowseResult,
+  CatalogFilterGroup,
+  CatalogSortOption,
   GameInfo,
   GameVariant,
   LoginProvider,
@@ -17,6 +20,8 @@ import type {
   SubscriptionInfo,
   StreamRegion,
   VideoCodec,
+  PrintedWasteQueueData,
+  PrintedWasteServerMapping,
 } from "@shared/gfn";
 import {
   DEFAULT_KEYBOARD_LAYOUT,
@@ -53,6 +58,7 @@ import { StreamLoading } from "./components/StreamLoading";
 import { ControllerStreamLoading } from "./components/ControllerStreamLoading";
 import type { QueueAdPlaybackEvent, QueueAdPreviewHandle } from "./components/QueueAdPreview";
 import { StreamView } from "./components/StreamView";
+import { QueueServerSelectModal } from "./components/QueueServerSelectModal";
 
 const codecOptions: VideoCodec[] = [...USER_FACING_VIDEO_CODEC_OPTIONS];
 const DEFAULT_STREAM_PREFERENCES = getDefaultStreamPreferences();
@@ -80,6 +86,16 @@ const getResolutionsByAspectRatio = (aspectRatio: string): string[] => {
   return allResolutionOptions.filter(res => RESOLUTION_TO_ASPECT_RATIO[res] === aspectRatio);
 };
 const resolutionOptions = getResolutionsByAspectRatio("16:9");
+
+type AppStyle = CSSProperties & {
+  "--game-poster-scale"?: string;
+};
+
+function getAppStyle(posterSizeScale: number): AppStyle {
+  return {
+    "--game-poster-scale": String(posterSizeScale),
+  };
+}
 const SESSION_READY_POLL_INTERVAL_MS = 2000;
 const SESSION_AD_POLL_INTERVAL_MS = 30000;
 const SESSION_AD_PROGRESS_CHECK_INTERVAL_MS = 1000;
@@ -88,6 +104,7 @@ const SESSION_AD_FORCE_PLAY_TIMEOUT_MS = 10000;
 const SESSION_AD_STUCK_TIMEOUT_MS = 30000;
 const SESSION_READY_TIMEOUT_MS = 180000;
 const VARIANT_SELECTION_LOCALSTORAGE_KEY = "opennow.variantByGameId";
+const CATALOG_PREFERENCES_LOCALSTORAGE_KEY = "opennow.catalogPreferences.v1";
 const PLAYTIME_RESYNC_INTERVAL_MS = 5 * 60 * 1000;
 const FREE_TIER_SESSION_LIMIT_SECONDS = 60 * 60;
 const FREE_TIER_30_MIN_WARNING_SECONDS = 30 * 60;
@@ -95,7 +112,36 @@ const FREE_TIER_15_MIN_WARNING_SECONDS = 15 * 60;
 const FREE_TIER_FINAL_MINUTE_WARNING_SECONDS = 60;
 const STREAM_WARNING_VISIBILITY_MS = 15 * 1000;
 
-type GameSource = "main" | "library" | "public";
+interface CatalogPreferences {
+  sortId: string;
+  filterIds: string[];
+}
+
+function loadCatalogPreferences(): CatalogPreferences {
+  try {
+    const raw = localStorage.getItem(CATALOG_PREFERENCES_LOCALSTORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<CatalogPreferences>;
+      return {
+        sortId: typeof parsed.sortId === "string" ? parsed.sortId : "relevance",
+        filterIds: Array.isArray(parsed.filterIds) ? parsed.filterIds.filter((id): id is string => typeof id === "string") : [],
+      };
+    }
+  } catch {
+    // ignore
+  }
+  return { sortId: "relevance", filterIds: [] };
+}
+
+function saveCatalogPreferences(prefs: CatalogPreferences): void {
+  try {
+    localStorage.setItem(CATALOG_PREFERENCES_LOCALSTORAGE_KEY, JSON.stringify(prefs));
+  } catch {
+    // ignore
+  }
+}
+
+type GameSource = "main" | "library";
 type AppPage = "home" | "library" | "settings";
 type StreamStatus = "idle" | "queue" | "setup" | "starting" | "connecting" | "streaming";
 type StreamLoadingStatus = "queue" | "setup" | "starting" | "connecting";
@@ -130,6 +176,29 @@ type QueueAdReportOptions = {
 const APP_PAGE_ORDER: AppPage[] = ["home", "library", "settings"];
 
 const isMac = navigator.platform.toLowerCase().includes("mac");
+
+function isStandardPrintedWasteZone(zoneId: string): boolean {
+  return zoneId.startsWith("NP-") && !zoneId.startsWith("NPA-");
+}
+
+function isAllianceStreamingBaseUrl(streamingBaseUrl: string): boolean {
+  if (!streamingBaseUrl.trim()) return false;
+  try {
+    const { hostname } = new URL(streamingBaseUrl);
+    return !hostname.endsWith(".nvidiagrid.net");
+  } catch {
+    return false;
+  }
+}
+
+function hasAnyEligiblePrintedWasteZone(
+  queueData: PrintedWasteQueueData,
+  mapping: PrintedWasteServerMapping,
+): boolean {
+  return Object.keys(queueData).some((zoneId) => (
+    isStandardPrintedWasteZone(zoneId) && mapping[zoneId]?.nuked !== true
+  ));
+}
 
 const DEFAULT_SHORTCUTS = {
   shortcutToggleStats: "F3",
@@ -218,6 +287,76 @@ function findSessionContextForAppId(
   return null;
 }
 
+function matchesGameSearch(game: GameInfo, query: string): boolean {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return true;
+  if (game.searchText?.includes(normalizedQuery)) return true;
+  return [
+    game.title,
+    game.description,
+    game.publisherName,
+    ...(game.genres ?? []),
+    ...(game.featureLabels ?? []),
+    ...(game.availableStores ?? []),
+  ]
+    .filter((value): value is string => typeof value === "string" && value.length > 0)
+    .some((value) => value.toLowerCase().includes(normalizedQuery));
+}
+
+function chooseAccountLinked(game: GameInfo, selectedVariant?: GameVariant): boolean {
+  if (game.playType === "INSTALL_TO_PLAY") {
+    return false;
+  }
+  if (selectedVariant?.librarySelected) {
+    return true;
+  }
+  if (selectedVariant?.libraryStatus === "IN_LIBRARY") {
+    return true;
+  }
+  if (game.isInLibrary) {
+    return true;
+  }
+  return false;
+}
+
+function areStringArraysEqual(left: string[], right: string[]): boolean {
+  if (left.length != right.length) {
+    return false;
+  }
+  return left.every((value, index) => value === right[index]);
+}
+
+function sortLibraryGames(games: GameInfo[], sortId: string): GameInfo[] {
+  const copy = [...games];
+  const compareTitle = (left: GameInfo, right: GameInfo) => left.title.localeCompare(right.title);
+  if (sortId === "z_to_a") {
+    return copy.sort((left, right) => right.title.localeCompare(left.title));
+  }
+  if (sortId === "a_to_z") {
+    return copy.sort(compareTitle);
+  }
+  if (sortId === "last_played") {
+    return copy.sort((left, right) => {
+      const leftTime = left.lastPlayed ? new Date(left.lastPlayed).getTime() : 0;
+      const rightTime = right.lastPlayed ? new Date(right.lastPlayed).getTime() : 0;
+      if (leftTime === rightTime) return compareTitle(left, right);
+      return rightTime - leftTime;
+    });
+  }
+  if (sortId === "last_added") {
+    return copy.sort((left, right) => {
+      const leftTime = left.isInLibrary ? new Date(left.lastPlayed ?? 0).getTime() : 0;
+      const rightTime = right.isInLibrary ? new Date(right.lastPlayed ?? 0).getTime() : 0;
+      if (leftTime === rightTime) return compareTitle(left, right);
+      return rightTime - leftTime;
+    });
+  }
+  if (sortId === "most_popular") {
+    return copy.sort((left, right) => (right.membershipTierLabel ? 1 : 0) - (left.membershipTierLabel ? 1 : 0) || compareTitle(left, right));
+  }
+  return copy.sort(compareTitle);
+}
+
 function mergeVariantSelections(
   current: Record<string, string>,
   catalog: GameInfo[],
@@ -261,8 +400,12 @@ function defaultDiagnostics(): StreamDiagnostics {
     jitterBufferDelayMs: 0,
     inputQueueBufferedBytes: 0,
     inputQueuePeakBufferedBytes: 0,
+    partiallyReliableInputQueueBufferedBytes: 0,
+    partiallyReliableInputQueuePeakBufferedBytes: 0,
     inputQueueDropCount: 0,
     inputQueueMaxSchedulingDelayMs: 0,
+    partiallyReliableInputOpen: false,
+    mouseMoveTransport: "reliable",
     lagReason: "unknown",
     lagReasonDetail: "Waiting for stream stats",
     gpuType: "",
@@ -652,11 +795,19 @@ export function App(): JSX.Element {
   const [selectedGameId, setSelectedGameId] = useState("");
   const [variantByGameId, setVariantByGameId] = useState<Record<string, string>>({});
   const [isLoadingGames, setIsLoadingGames] = useState(false);
+  const [catalogFilterGroups, setCatalogFilterGroups] = useState<CatalogFilterGroup[]>([]);
+  const [catalogSortOptions, setCatalogSortOptions] = useState<CatalogSortOption[]>([]);
+  const [catalogSelectedSortId, setCatalogSelectedSortId] = useState(() => loadCatalogPreferences().sortId);
+  const [catalogSelectedFilterIds, setCatalogSelectedFilterIds] = useState<string[]>(() => loadCatalogPreferences().filterIds);
+  const [catalogTotalCount, setCatalogTotalCount] = useState(0);
+  const [catalogSupportedCount, setCatalogSupportedCount] = useState(0);
+  const catalogFilterKey = useMemo(() => catalogSelectedFilterIds.join("|"), [catalogSelectedFilterIds]);
 
   // Settings State
   const [settings, setSettings] = useState<Settings>({
     resolution: "1920x1080",
     aspectRatio: "16:9",
+    posterSizeScale: 1,
     fps: 60,
     maxBitrateMbps: 75,
     codec: DEFAULT_STREAM_PREFERENCES.codec,
@@ -692,6 +843,8 @@ export function App(): JSX.Element {
     keyboardLayout: DEFAULT_KEYBOARD_LAYOUT,
     gameLanguage: "en_US",
     enableL4S: false,
+    enableCloudGsync: false,
+    discordRichPresence: false,
   });
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [codecResults, setCodecResults] = useState<CodecTestResult[] | null>(() => loadStoredCodecResults());
@@ -718,6 +871,8 @@ export function App(): JSX.Element {
   const [navbarActiveSession, setNavbarActiveSession] = useState<ActiveSessionInfo | null>(null);
   const [isResumingNavbarSession, setIsResumingNavbarSession] = useState(false);
   const [launchError, setLaunchError] = useState<LaunchErrorState | null>(null);
+  const [queueModalGame, setQueueModalGame] = useState<GameInfo | null>(null);
+  const [queueModalData, setQueueModalData] = useState<PrintedWasteQueueData | null>(null);
   const [sessionStartedAtMs, setSessionStartedAtMs] = useState<number | null>(null);
   const [remoteStreamWarning, setRemoteStreamWarning] = useState<StreamWarningState | null>(null);
   const [localSessionTimerWarning, setLocalSessionTimerWarning] = useState<LocalSessionTimerWarningState | null>(null);
@@ -982,9 +1137,9 @@ export function App(): JSX.Element {
   const queueAdPlaybackRef = useRef<{ adId: string; phase: "playing" | "finishing" } | null>(null);
   const queueAdPreviewRef = useRef<QueueAdPreviewHandle | null>(null);
   const activeQueueAdIdRef = useRef<string | null>(null);
-  const adForcePlayTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const adStartTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const adProgressIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const adForcePlayTimeoutRef = useRef<number | null>(null);
+  const adStartTimeoutRef = useRef<number | null>(null);
+  const adProgressIntervalRef = useRef<number | null>(null);
   const adLastProgressTsRef = useRef<number | null>(null);
   // Stable ref so timer callbacks can call the latest reportQueueAdAction without
   // capturing a stale closure (auth state can change between scheduling and firing).
@@ -1658,36 +1813,39 @@ export function App(): JSX.Element {
 
           // Load games
           try {
-            const mainGames = await window.openNow.fetchMainGames({
-              token,
-              providerStreamingBaseUrl: persistedSession.provider.streamingServiceUrl,
-            });
-            setGames(mainGames);
-            setSource("main");
-            setSelectedGameId(mainGames[0]?.id ?? "");
-            applyVariantSelections(mainGames);
-
-            // Also load library
-            const libGames = await window.openNow.fetchLibraryGames({
-              token,
-              providerStreamingBaseUrl: persistedSession.provider.streamingServiceUrl,
-            });
+            const [catalogResult, libGames] = await Promise.all([
+              window.openNow.browseCatalog({
+                token,
+                providerStreamingBaseUrl: persistedSession.provider.streamingServiceUrl,
+                searchQuery: "",
+                sortId: catalogSelectedSortId,
+                filterIds: catalogSelectedFilterIds,
+              }),
+              window.openNow.fetchLibraryGames({
+                token,
+                providerStreamingBaseUrl: persistedSession.provider.streamingServiceUrl,
+              }),
+            ]);
+            applyCatalogBrowseResult(catalogResult);
             setLibraryGames(libGames);
             applyVariantSelections(libGames);
-          } catch {
-            // Fallback to public games
-            const publicGames = await window.openNow.fetchPublicGames();
-            setGames(publicGames);
-            setSource("public");
-            applyVariantSelections(publicGames);
+          } catch (catalogError) {
+            console.error("Initialization games load failed:", catalogError);
+            setGames([]);
+            setLibraryGames([]);
+            setCatalogFilterGroups([]);
+            setCatalogSortOptions([]);
+            setCatalogTotalCount(0);
+            setCatalogSupportedCount(0);
           }
         } else {
-          // Load public games for non-logged in users
-          const publicGames = await window.openNow.fetchPublicGames();
-          setGames(publicGames);
-          setSource("public");
-          applyVariantSelections(publicGames);
+          setGames([]);
+          setLibraryGames([]);
           setSubscriptionInfo(null);
+          setCatalogFilterGroups([]);
+          setCatalogSortOptions([]);
+          setCatalogTotalCount(0);
+          setCatalogSupportedCount(0);
         }
       } catch (error) {
         console.error("Initialization failed:", error);
@@ -1703,6 +1861,10 @@ export function App(): JSX.Element {
   useEffect(() => {
     saveStoredCodecResults(codecResults);
   }, [codecResults]);
+
+  useEffect(() => {
+    saveCatalogPreferences({ sortId: catalogSelectedSortId, filterIds: catalogSelectedFilterIds });
+  }, [catalogSelectedSortId, catalogSelectedFilterIds]);
 
   useEffect(() => {
     if (codecResults || codecTesting || codecStartupTestAttemptedRef.current) {
@@ -1754,7 +1916,7 @@ export function App(): JSX.Element {
       }
     };
 
-    if (!document.fullscreenElement) {
+    if (settings.autoFullScreen && !document.fullscreenElement) {
       await document.documentElement.requestFullscreen().catch(() => {});
     }
 
@@ -1773,7 +1935,7 @@ export function App(): JSX.Element {
         throw err;
       })
       .catch(() => {});
-  }, []);
+  }, [settings.autoFullScreen]);
 
   const handleRequestPointerLock = useCallback(() => {
     if (videoRef.current) {
@@ -1970,6 +2132,7 @@ export function App(): JSX.Element {
             clientRef.current = new GfnWebRtcClient({
               videoElement: videoRef.current,
               audioElement: audioRef.current,
+              autoFullScreen: settings.autoFullScreen,
               microphoneMode: settings.microphoneMode,
               microphoneDeviceId: settings.microphoneDeviceId || undefined,
               mouseSensitivity: settings.mouseSensitivity,
@@ -2056,6 +2219,13 @@ export function App(): JSX.Element {
         // ignore
       }
     }
+    if (key === "autoFullScreen") {
+      try {
+        (clientRef.current as any)?.setAutoFullScreen?.(value as boolean);
+      } catch {
+        // ignore
+      }
+    }
     if (key === "maxBitrateMbps") {
       try {
         void (clientRef.current as any)?.setMaxBitrateKbps?.((value as number) * 1000);
@@ -2110,6 +2280,19 @@ export function App(): JSX.Element {
     });
   }, [updateSetting]);
 
+  const applyCatalogBrowseResult = useCallback((catalogResult: CatalogBrowseResult): void => {
+    setGames(catalogResult.games);
+    setCatalogFilterGroups(catalogResult.filterGroups);
+    setCatalogSortOptions(catalogResult.sortOptions);
+    setCatalogSelectedSortId((previous) => previous === catalogResult.selectedSortId ? previous : catalogResult.selectedSortId);
+    setCatalogSelectedFilterIds((previous) => areStringArraysEqual(previous, catalogResult.selectedFilterIds) ? previous : catalogResult.selectedFilterIds);
+    setCatalogTotalCount(catalogResult.totalCount);
+    setCatalogSupportedCount(catalogResult.numberSupported);
+    setSource("main");
+    setSelectedGameId((previous) => catalogResult.games.some((game) => game.id === previous) ? previous : (catalogResult.games[0]?.id ?? ""));
+    applyVariantSelections(catalogResult.games);
+  }, [applyVariantSelections]);
+
   // Login handler
   const handleLogin = useCallback(async () => {
     setIsLoggingIn(true);
@@ -2131,21 +2314,20 @@ export function App(): JSX.Element {
         setSubscriptionInfo(null);
       }
 
-      // Load games
-      const mainGames = await window.openNow.fetchMainGames({
-        token,
-        providerStreamingBaseUrl: session.provider.streamingServiceUrl,
-      });
-      setGames(mainGames);
-      setSource("main");
-      setSelectedGameId(mainGames[0]?.id ?? "");
-      applyVariantSelections(mainGames);
-
-      // Load library
-      const libGames = await window.openNow.fetchLibraryGames({
-        token,
-        providerStreamingBaseUrl: session.provider.streamingServiceUrl,
-      });
+      const [catalogResult, libGames] = await Promise.all([
+        window.openNow.browseCatalog({
+          token,
+          providerStreamingBaseUrl: session.provider.streamingServiceUrl,
+          searchQuery: "",
+          sortId: catalogSelectedSortId,
+          filterIds: catalogSelectedFilterIds,
+        }),
+        window.openNow.fetchLibraryGames({
+          token,
+          providerStreamingBaseUrl: session.provider.streamingServiceUrl,
+        }),
+      ]);
+      applyCatalogBrowseResult(catalogResult);
       setLibraryGames(libGames);
       applyVariantSelections(libGames);
     } catch (error) {
@@ -2153,7 +2335,7 @@ export function App(): JSX.Element {
     } finally {
       setIsLoggingIn(false);
     }
-  }, [applyVariantSelections, loadSubscriptionInfo, providerIdpId]);
+  }, [applyCatalogBrowseResult, applyVariantSelections, loadSubscriptionInfo, providerIdpId, catalogFilterKey, catalogSelectedSortId]);
 
   // Logout handler
   const handleLogout = useCallback(async () => {
@@ -2167,11 +2349,15 @@ export function App(): JSX.Element {
     setIsResumingNavbarSession(false);
     setSubscriptionInfo(null);
     setCurrentPage("home");
-    const publicGames = await window.openNow.fetchPublicGames();
-    setGames(publicGames);
-    setSource("public");
-    applyVariantSelections(publicGames);
-  }, [applyVariantSelections, resetLaunchRuntime]);
+    setCatalogFilterGroups([]);
+    setCatalogSortOptions([]);
+    setCatalogSelectedSortId("relevance");
+    setCatalogSelectedFilterIds([]);
+    setCatalogTotalCount(0);
+    setCatalogSupportedCount(0);
+    setSource("main");
+    setSelectedGameId("");
+  }, [resetLaunchRuntime]);
 
   // Load games handler
   const loadGames = useCallback(async (targetSource: GameSource) => {
@@ -2179,30 +2365,43 @@ export function App(): JSX.Element {
     try {
       const token = authSession?.tokens.idToken ?? authSession?.tokens.accessToken;
       const baseUrl = effectiveStreamingBaseUrl;
-
-      let result: GameInfo[] = [];
-      if (targetSource === "main" && token) {
-        result = await window.openNow.fetchMainGames({ token, providerStreamingBaseUrl: baseUrl });
-      } else if (targetSource === "library" && token) {
-        result = await window.openNow.fetchLibraryGames({ token, providerStreamingBaseUrl: baseUrl });
-        setLibraryGames(result);
-        applyVariantSelections(result);
-      } else if (targetSource === "public") {
-        result = await window.openNow.fetchPublicGames();
+      if (!token) {
+        return;
       }
 
-      if (targetSource !== "library") {
-        setGames(result);
-        setSource(targetSource);
-        setSelectedGameId(result[0]?.id ?? "");
-        applyVariantSelections(result);
+      if (targetSource === "main") {
+        const catalogResult = await window.openNow.browseCatalog({
+          token,
+          providerStreamingBaseUrl: baseUrl,
+          searchQuery,
+          sortId: catalogSelectedSortId,
+          filterIds: catalogSelectedFilterIds,
+        });
+        applyCatalogBrowseResult(catalogResult);
+        return;
       }
+
+      const result = await window.openNow.fetchLibraryGames({ token, providerStreamingBaseUrl: baseUrl });
+      setLibraryGames(result);
+      setSource("library");
+      setSelectedGameId((previous) => result.some((game) => game.id === previous) ? previous : (result[0]?.id ?? ""));
+      applyVariantSelections(result);
     } catch (error) {
       console.error("Failed to load games:", error);
     } finally {
       setIsLoadingGames(false);
     }
-  }, [applyVariantSelections, authSession, effectiveStreamingBaseUrl]);
+  }, [applyCatalogBrowseResult, applyVariantSelections, authSession, effectiveStreamingBaseUrl, searchQuery, catalogFilterKey, catalogSelectedSortId]);
+
+  useEffect(() => {
+    if (!authSession || source !== "main") {
+      return;
+    }
+    const handle = window.setTimeout(() => {
+      void loadGames("main");
+    }, searchQuery.trim() ? 220 : 0);
+    return () => window.clearTimeout(handle);
+  }, [authSession, loadGames, searchQuery, source, catalogFilterKey, catalogSelectedSortId]);
 
   const handleSelectGameVariant = useCallback((gameId: string, variantId: string): void => {
     setVariantByGameId((prev) => {
@@ -2251,6 +2450,7 @@ export function App(): JSX.Element {
         keyboardLayout: settings.keyboardLayout,
         gameLanguage: settings.gameLanguage,
         enableL4S: settings.enableL4S,
+        enableCloudGsync: settings.enableCloudGsync,
       },
     });
 
@@ -2275,7 +2475,7 @@ export function App(): JSX.Element {
   }, [authSession, effectiveStreamingBaseUrl, findGameContextForSession, resetStatsOverlayToPreference, settings]);
 
   // Play game handler
-  const handlePlayGame = useCallback(async (game: GameInfo, options?: { bypassGuards?: boolean }) => {
+  const handlePlayGame = useCallback(async (game: GameInfo, options?: { bypassGuards?: boolean; streamingBaseUrl?: string }) => {
     if (!selectedProvider) return;
 
     console.log("handlePlayGame entry", {
@@ -2390,10 +2590,10 @@ export function App(): JSX.Element {
       // Create new session
       const newSession = await window.openNow.createSession({
         token: token || undefined,
-        streamingBaseUrl: effectiveStreamingBaseUrl,
+        streamingBaseUrl: options?.streamingBaseUrl || effectiveStreamingBaseUrl,
         appId,
         internalTitle: game.title,
-        accountLinked: game.playType !== "INSTALL_TO_PLAY",
+        accountLinked: chooseAccountLinked(game, selectedVariant),
         zone: "prod",
         settings: {
           resolution: settings.resolution,
@@ -2404,6 +2604,7 @@ export function App(): JSX.Element {
           keyboardLayout: settings.keyboardLayout,
           gameLanguage: settings.gameLanguage,
           enableL4S: settings.enableL4S,
+          enableCloudGsync: settings.enableCloudGsync,
         },
       });
 
@@ -2570,6 +2771,80 @@ export function App(): JSX.Element {
     streamStatus,
     variantByGameId,
   ]);
+
+  // Gate handler: shows queue server modal for FREE-tier users before launching
+  const handleInitiatePlay = useCallback(async (game: GameInfo) => {
+    const effectiveTier = normalizeMembershipTier(
+      subscriptionInfo?.membershipTier ?? authSession?.user.membershipTier,
+    );
+    const isFreeUser = effectiveTier === "FREE";
+    const isAllianceServer = isAllianceStreamingBaseUrl(effectiveStreamingBaseUrl);
+    if (isAllianceServer) {
+      setQueueModalData(null);
+      void handlePlayGame(game);
+      return;
+    }
+    if (isFreeUser && streamStatus === "idle" && !launchInFlightRef.current) {
+      try {
+        const [queueResult, mappingResult] = await Promise.allSettled([
+          window.openNow.fetchPrintedWasteQueue(),
+          window.openNow.fetchPrintedWasteServerMapping(),
+        ]);
+
+        if (queueResult.status !== "fulfilled" || mappingResult.status !== "fulfilled") {
+          console.warn(
+            "[QueueServerSelect] PrintedWaste unavailable, skipping queue checks and launching with default routing.",
+            {
+              queueStatus: queueResult.status,
+              mappingStatus: mappingResult.status,
+            },
+          );
+          setQueueModalData(null);
+          void handlePlayGame(game);
+          return;
+        }
+
+        const queueData = queueResult.value;
+        if (!queueData || Object.keys(queueData).length === 0) {
+          setQueueModalData(null);
+          void handlePlayGame(game);
+          return;
+        }
+
+        if (!hasAnyEligiblePrintedWasteZone(queueData, mappingResult.value)) {
+          console.warn(
+            "[QueueServerSelect] No eligible non-nuked PrintedWaste zones available, skipping queue checks.",
+          );
+          setQueueModalData(null);
+          void handlePlayGame(game);
+          return;
+        }
+
+        setQueueModalData(queueData);
+        setQueueModalGame(game);
+      } catch (error) {
+        console.warn("[QueueServerSelect] PrintedWaste queue checks failed, launching without modal.", error);
+        setQueueModalData(null);
+        void handlePlayGame(game);
+      }
+      return;
+    }
+    void handlePlayGame(game);
+  }, [subscriptionInfo, authSession, streamStatus, handlePlayGame, effectiveStreamingBaseUrl]);
+
+  const handleQueueModalConfirm = useCallback((zoneUrl: string | null) => {
+    const game = queueModalGame;
+    setQueueModalGame(null);
+    setQueueModalData(null);
+    if (game) {
+      void handlePlayGame(game, { streamingBaseUrl: zoneUrl ?? undefined });
+    }
+  }, [queueModalGame, handlePlayGame]);
+
+  const handleQueueModalCancel = useCallback(() => {
+    setQueueModalGame(null);
+    setQueueModalData(null);
+  }, []);
 
   const handleResumeFromNavbar = useCallback(async () => {
     if (!selectedProvider || !navbarActiveSession || isResumingNavbarSession) {
@@ -2884,18 +3159,13 @@ export function App(): JSX.Element {
     streamStatus,
   ]);
 
-  // Filter games by search
-  const filteredGames = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
-    if (!query) return games;
-    return games.filter((g) => g.title.toLowerCase().includes(query));
-  }, [games, searchQuery]);
+  const filteredGames = games;
 
   const filteredLibraryGames = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
-    if (!query) return libraryGames;
-    return libraryGames.filter((g) => g.title.toLowerCase().includes(query));
-  }, [libraryGames, searchQuery]);
+    const query = searchQuery.trim();
+    const searched = query ? libraryGames.filter((game) => matchesGameSearch(game, query)) : libraryGames;
+    return sortLibraryGames(searched, catalogSelectedSortId === "relevance" ? "last_played" : catalogSelectedSortId);
+  }, [libraryGames, searchQuery, catalogSelectedSortId]);
 
   const activeSessionGameTitle = useMemo(() => {
     if (!navbarActiveSession) return null;
@@ -3004,6 +3274,7 @@ export function App(): JSX.Element {
               toggleStats: formatShortcutForDisplay(settings.shortcutToggleStats, isMac),
               togglePointerLock: formatShortcutForDisplay(settings.shortcutTogglePointerLock, isMac),
               stopStream: formatShortcutForDisplay(settings.shortcutStopStream, isMac),
+              toggleAntiAfk: shortcuts.toggleAntiAfk.canonical,
               toggleMicrophone: formatShortcutForDisplay(settings.shortcutToggleMicrophone, isMac),
               screenshot: shortcuts.screenshot.canonical,
               recording: shortcuts.recording.canonical,
@@ -3149,12 +3420,14 @@ export function App(): JSX.Element {
                 fps: settings.fps,
                 codec: settings.codec,
                 enableL4S: settings.enableL4S,
+                enableCloudGsync: settings.enableCloudGsync,
                 microphoneDeviceId: settings.microphoneDeviceId,
                 controllerUiSounds: settings.controllerUiSounds,
                 controllerBackgroundAnimations: settings.controllerBackgroundAnimations,
                 autoLoadControllerLibrary: settings.autoLoadControllerLibrary,
                 autoFullScreen: settings.autoFullScreen,
                 aspectRatio: settings.aspectRatio,
+                posterSizeScale: settings.posterSizeScale,
                 maxBitrateMbps: settings.maxBitrateMbps,
               }}
               resolutionOptions={getResolutionsByAspectRatio(settings.aspectRatio)}
@@ -3234,7 +3507,7 @@ export function App(): JSX.Element {
 
   // Main app layout
   return (
-    <div className="app-container">
+    <div className="app-container" style={getAppStyle(settings.posterSizeScale)}>
       {startupRefreshNotice && (
         <div className={`auth-refresh-notice auth-refresh-notice--${startupRefreshNotice.tone}`}>
           {startupRefreshNotice.text}
@@ -3260,16 +3533,35 @@ export function App(): JSX.Element {
         {currentPage === "home" && (
           <HomePage
             games={filteredGames}
-            source={source}
-            onSourceChange={loadGames}
+            source="main"
+            onSourceChange={(nextSource) => {
+              if (nextSource === "library") {
+                setCurrentPage("library");
+                if (libraryGames.length === 0 && authSession) {
+                  void loadGames("library");
+                }
+                return;
+              }
+              void loadGames("main");
+            }}
             searchQuery={searchQuery}
             onSearchChange={setSearchQuery}
-            onPlayGame={handlePlayGame}
+            onPlayGame={handleInitiatePlay}
             isLoading={isLoadingGames}
             selectedGameId={selectedGameId}
             onSelectGame={setSelectedGameId}
             selectedVariantByGameId={variantByGameId}
             onSelectGameVariant={handleSelectGameVariant}
+            filterGroups={catalogFilterGroups}
+            selectedFilterIds={catalogSelectedFilterIds}
+            onToggleFilter={(filterId) => {
+              setCatalogSelectedFilterIds((previous) => previous.includes(filterId) ? previous.filter((value) => value !== filterId) : [...previous, filterId]);
+            }}
+            sortOptions={catalogSortOptions}
+            selectedSortId={catalogSelectedSortId}
+            onSortChange={setCatalogSelectedSortId}
+            totalCount={catalogTotalCount}
+            supportedCount={catalogSupportedCount}
           />
         )}
 
@@ -3277,7 +3569,7 @@ export function App(): JSX.Element {
           settings.controllerMode ? (
             <ControllerLibraryPage
               games={filteredLibraryGames}
-              onPlayGame={handlePlayGame}
+              onPlayGame={handleInitiatePlay}
               isLoading={isLoadingGames}
               selectedGameId={selectedGameId}
               onSelectGame={setSelectedGameId}
@@ -3303,12 +3595,14 @@ export function App(): JSX.Element {
                 fps: settings.fps,
                 codec: settings.codec,
                 enableL4S: settings.enableL4S,
+                enableCloudGsync: settings.enableCloudGsync,
                 microphoneDeviceId: settings.microphoneDeviceId,
                 controllerUiSounds: settings.controllerUiSounds,
                 controllerBackgroundAnimations: settings.controllerBackgroundAnimations,
                 autoLoadControllerLibrary: settings.autoLoadControllerLibrary,
                 autoFullScreen: settings.autoFullScreen,
                 aspectRatio: settings.aspectRatio,
+                posterSizeScale: settings.posterSizeScale,
                 maxBitrateMbps: settings.maxBitrateMbps,
               }}
               resolutionOptions={getResolutionsByAspectRatio(settings.aspectRatio)}
@@ -3324,12 +3618,16 @@ export function App(): JSX.Element {
               games={filteredLibraryGames}
               searchQuery={searchQuery}
               onSearchChange={setSearchQuery}
-              onPlayGame={handlePlayGame}
+              onPlayGame={handleInitiatePlay}
               isLoading={isLoadingGames}
               selectedGameId={selectedGameId}
               onSelectGame={setSelectedGameId}
               selectedVariantByGameId={variantByGameId}
               onSelectGameVariant={handleSelectGameVariant}
+              libraryCount={libraryGames.length}
+              sortOptions={catalogSortOptions.filter((option) => option.id !== "relevance")}
+              selectedSortId={catalogSelectedSortId === "relevance" ? "last_played" : catalogSelectedSortId}
+              onSortChange={setCatalogSelectedSortId}
             />
           )
         )}
@@ -3352,6 +3650,15 @@ export function App(): JSX.Element {
           <span>B Back</span>
           <span>LB/RB Tabs</span>
         </div>
+      )}
+
+      {queueModalGame && streamStatus === "idle" && (
+        <QueueServerSelectModal
+          game={queueModalGame}
+          initialQueueData={queueModalData}
+          onConfirm={handleQueueModalConfirm}
+          onCancel={handleQueueModalCancel}
+        />
       )}
     </div>
   );
