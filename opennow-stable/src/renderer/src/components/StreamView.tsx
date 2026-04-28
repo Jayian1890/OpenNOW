@@ -20,6 +20,7 @@ interface StreamViewProps {
   shortcuts: {
     toggleStats: string;
     togglePointerLock: string;
+    toggleFullscreen: string;
     stopStream: string;
     toggleAntiAfk: string;
     toggleMicrophone?: string;
@@ -29,10 +30,7 @@ interface StreamViewProps {
   hideStreamButtons?: boolean;
   serverRegion?: string;
   antiAfkEnabled: boolean;
-  escHoldReleaseIndicator: {
-    visible: boolean;
-    progress: number;
-  };
+  showAntiAfkIndicator: boolean;
   exitPrompt: {
     open: boolean;
     gameTitle: string;
@@ -196,6 +194,7 @@ function StreamStatsHud({
   const inputQueueColor = getInputQueueColor(stats.inputQueueBufferedBytes, stats.inputQueueDropCount);
   const inputQueueText = `${(stats.inputQueueBufferedBytes / 1024).toFixed(1)}KB`;
   const partiallyReliableQueueText = `${(stats.partiallyReliableInputQueueBufferedBytes / 1024).toFixed(1)}KB`;
+  const mouseResidualText = `${stats.mouseResidualMagnitude.toFixed(2)}px`;
 
   return (
     <div className="sv-stats">
@@ -242,6 +241,11 @@ function StreamStatsHud({
             {stats.partiallyReliableInputOpen ? `${stats.mouseMoveTransport === "partially_reliable" ? "mouse" : "open"} · ${partiallyReliableQueueText}` : "off"}
           </span>
         </span>
+        <span className="sv-stats-chip" title="Mouse flush cadence and packet rate">
+          MF <span className="sv-stats-chip-val" style={{ color: stats.mouseAdaptiveFlushActive ? "var(--warning)" : "var(--success)" }}>
+            {stats.mouseFlushIntervalMs.toFixed(0)}ms · {stats.mousePacketsPerSecond}/s
+          </span>
+        </span>
         {stats.lagReason !== "stable" && stats.lagReason !== "unknown" && (
           <span className="sv-stats-chip" title={stats.lagReasonDetail}>
             Lag <span className="sv-stats-chip-val" style={{ color: getLagReasonColor(stats.lagReason) }}>{getLagReasonLabel(stats.lagReason)}</span>
@@ -250,7 +254,7 @@ function StreamStatsHud({
       </div>
 
       <div className="sv-stats-foot">
-        Input queue peak {(stats.inputQueuePeakBufferedBytes / 1024).toFixed(1)}KB · PR peak {(stats.partiallyReliableInputQueuePeakBufferedBytes / 1024).toFixed(1)}KB · drops {stats.inputQueueDropCount} · sched {stats.inputQueueMaxSchedulingDelayMs.toFixed(1)}ms
+        Input queue peak {(stats.inputQueuePeakBufferedBytes / 1024).toFixed(1)}KB · PR peak {(stats.partiallyReliableInputQueuePeakBufferedBytes / 1024).toFixed(1)}KB · drops {stats.inputQueueDropCount} · sched {stats.inputQueueMaxSchedulingDelayMs.toFixed(1)}ms · residual {mouseResidualText}
       </div>
 
       {(stats.decoderPressureActive || stats.decoderRecoveryAttempts > 0) && (
@@ -300,13 +304,13 @@ function ControllerIndicator({
 
 function MicrophoneIndicator({
   diagnosticsStore,
-  antiAfkEnabled,
+  showAntiAfkIndicator,
   hideStreamButtons,
   isConnecting,
   onToggleMicrophone,
 }: {
   diagnosticsStore: StreamDiagnosticsStore;
-  antiAfkEnabled: boolean;
+  showAntiAfkIndicator: boolean;
   hideStreamButtons: boolean;
   isConnecting: boolean;
   onToggleMicrophone?: () => void;
@@ -330,7 +334,7 @@ function MicrophoneIndicator({
   return (
     <button
       type="button"
-      className={`sv-mic${connectedGamepads > 0 || antiAfkEnabled ? " sv-mic--stacked" : ""}`}
+      className={`sv-mic${connectedGamepads > 0 || showAntiAfkIndicator ? " sv-mic--stacked" : ""}`}
       onClick={onToggleMicrophone}
       data-enabled={micEnabled}
       title={micEnabled ? "Mute microphone" : "Unmute microphone"}
@@ -345,10 +349,12 @@ function MicrophoneIndicator({
 function AntiAfkIndicator({
   diagnosticsStore,
   antiAfkEnabled,
+  showAntiAfkIndicator,
   isConnecting,
 }: {
   diagnosticsStore: StreamDiagnosticsStore;
   antiAfkEnabled: boolean;
+  showAntiAfkIndicator: boolean;
   isConnecting: boolean;
 }): JSX.Element | null {
   const hasController = useStreamDiagnosticsSelector(
@@ -356,7 +362,7 @@ function AntiAfkIndicator({
     (stats) => stats.connectedGamepads > 0,
   );
 
-  if (!antiAfkEnabled || isConnecting) {
+  if (!antiAfkEnabled || !showAntiAfkIndicator || isConnecting) {
     return null;
   }
 
@@ -370,7 +376,7 @@ function AntiAfkIndicator({
 
 function RecordingIndicator({
   diagnosticsStore,
-  antiAfkEnabled,
+  showAntiAfkIndicator,
   hideStreamButtons,
   isConnecting,
   isRecording,
@@ -378,7 +384,7 @@ function RecordingIndicator({
   recordingDurationMs,
 }: {
   diagnosticsStore: StreamDiagnosticsStore;
-  antiAfkEnabled: boolean;
+  showAntiAfkIndicator: boolean;
   hideStreamButtons: boolean;
   isConnecting: boolean;
   isRecording: boolean;
@@ -395,7 +401,7 @@ function RecordingIndicator({
   );
   const hasMicrophone = micState === "started" || micState === "stopped";
   const showMicIndicator = hasMicrophone && !isConnecting && !hideStreamButtons && Boolean(onToggleMicrophone);
-  const stackedBadges = [connectedGamepads > 0, antiAfkEnabled, showMicIndicator].filter(Boolean).length;
+  const stackedBadges = [connectedGamepads > 0, showAntiAfkIndicator, showMicIndicator].filter(Boolean).length;
 
   if (!isRecording || isConnecting) {
     return null;
@@ -642,7 +648,7 @@ export function StreamView({
   shortcuts,
   serverRegion,
   antiAfkEnabled,
-  escHoldReleaseIndicator,
+  showAntiAfkIndicator,
   exitPrompt,
   sessionStartedAtMs,
   isStreaming,
@@ -797,14 +803,6 @@ export function StreamView({
     };
   }, [isConnecting, sessionClockShowDurationSeconds, sessionClockShowEveryMinutes, sessionCounterEnabled]);
 
-  const escHoldProgress = Math.max(0, Math.min(1, escHoldReleaseIndicator.progress));
-  const escHoldCountdownSeconds = Math.max(0, 5 * (1 - escHoldProgress));
-  const escHoldCountdownLabel = escHoldCountdownSeconds > 0
-    ? `${escHoldCountdownSeconds.toFixed(1)}s`
-    : "0.0s";
-  const escHoldRingRadius = 54;
-  const escHoldRingCircumference = 2 * Math.PI * escHoldRingRadius;
-  const escHoldRingOffset = escHoldRingCircumference * escHoldProgress;
   const warningSeconds = formatWarningSeconds(streamWarning?.secondsLeft);
   const platformName = platformStore ? getStoreDisplayName(platformStore) : "";
   const PlatformIcon = platformStore ? getStoreIconComponent(platformStore) : null;
@@ -1952,7 +1950,7 @@ export function StreamView({
       {/* Microphone toggle button (top-left, below controller badge when present) */}
       <MicrophoneIndicator
         diagnosticsStore={diagnosticsStore}
-        antiAfkEnabled={antiAfkEnabled}
+        showAntiAfkIndicator={antiAfkEnabled && showAntiAfkIndicator}
         hideStreamButtons={hideStreamButtons}
         isConnecting={isConnecting}
         onToggleMicrophone={onToggleMicrophone}
@@ -1962,55 +1960,20 @@ export function StreamView({
       <AntiAfkIndicator
         diagnosticsStore={diagnosticsStore}
         antiAfkEnabled={antiAfkEnabled}
+        showAntiAfkIndicator={showAntiAfkIndicator}
         isConnecting={isConnecting}
       />
 
       {/* Recording indicator (top-left, stacked below other badges) */}
       <RecordingIndicator
         diagnosticsStore={diagnosticsStore}
-        antiAfkEnabled={antiAfkEnabled}
+        showAntiAfkIndicator={antiAfkEnabled && showAntiAfkIndicator}
         hideStreamButtons={hideStreamButtons}
         isConnecting={isConnecting}
         isRecording={isRecording}
         onToggleMicrophone={onToggleMicrophone}
         recordingDurationMs={recordingDurationMs}
       />
-
-      {/* Hold-Esc release indicator */}
-      {escHoldReleaseIndicator.visible && !isConnecting && (
-        <>
-          <div className="sv-esc-hold-backdrop" />
-          <div
-            className="sv-esc-hold"
-            role="status"
-            aria-label="Hold Escape to release mouse lock. Keep holding until the timer reaches zero."
-            title="Keep holding Escape to release mouse lock"
-          >
-            <div className="sv-esc-hold-kicker">Mouse lock</div>
-            <div className="sv-esc-hold-ring" aria-hidden="true">
-              <svg className="sv-esc-hold-ring-svg" viewBox="0 0 140 140">
-                <circle className="sv-esc-hold-ring-track" cx="70" cy="70" r={escHoldRingRadius} />
-                <circle
-                  className="sv-esc-hold-ring-progress"
-                  cx="70"
-                  cy="70"
-                  r={escHoldRingRadius}
-                  style={{
-                    strokeDasharray: escHoldRingCircumference,
-                    strokeDashoffset: escHoldRingOffset,
-                  }}
-                />
-              </svg>
-              <div className="sv-esc-hold-ring-core">
-                <span className="sv-esc-hold-time">{escHoldCountdownLabel}</span>
-                <span className="sv-esc-hold-caption">to release</span>
-              </div>
-            </div>
-            <div className="sv-esc-hold-title">Hold Escape</div>
-            <p className="sv-esc-hold-text">Keep holding until the timer reaches zero.</p>
-          </div>
-        </>
-      )}
 
       {exitPrompt.open && !isConnecting && typeof document !== "undefined" && createPortal(
         <div className="sv-exit" role="dialog" aria-modal="true" aria-label="Exit stream confirmation">
@@ -2072,6 +2035,7 @@ export function StreamView({
         <div className="sv-hints">
           <div className="sv-hint"><kbd>{shortcuts.toggleStats}</kbd><span>Stats</span></div>
           <div className="sv-hint"><kbd>{shortcuts.togglePointerLock}</kbd><span>Mouse lock</span></div>
+          <div className="sv-hint"><kbd>{shortcuts.toggleFullscreen}</kbd><span>Full screen</span></div>
           <div className="sv-hint"><kbd>{shortcuts.stopStream}</kbd><span>Stop</span></div>
           {shortcuts.toggleMicrophone && <div className="sv-hint"><kbd>{shortcuts.toggleMicrophone}</kbd><span>Mic</span></div>}
         </div>

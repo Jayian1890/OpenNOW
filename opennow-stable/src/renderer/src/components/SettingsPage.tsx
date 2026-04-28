@@ -1,4 +1,4 @@
-import { Globe, Check, Search, X, Loader, Zap, Mic, FileDown, Wifi, Trash2, Heart, Users, ExternalLink, Monitor, Keyboard } from "lucide-react";
+import { Globe, Check, Search, X, Loader, Zap, Mic, FileDown, Wifi, Trash2, Heart, Users, ExternalLink, Monitor, Keyboard, Download, RefreshCcw, Info } from "lucide-react";
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import type { JSX } from "react";
 
@@ -10,13 +10,14 @@ import type {
   EntitledResolution,
   VideoAccelerationPreference,
   MicrophoneMode,
-  PingResult,
-  GameLanguage,
-  MicrophonePermissionResult,
-  ThankYouDataResult,
-  ThankYouContributor,
-  ThankYouSupporter,
-} from "@shared/gfn";
+    PingResult,
+    GameLanguage,
+    MicrophonePermissionResult,
+    ThankYouDataResult,
+    ThankYouContributor,
+    ThankYouSupporter,
+    AppUpdaterState,
+  } from "@shared/gfn";
 import {
   colorQualityRequiresHevc,
   keyboardLayoutOptions,
@@ -37,7 +38,76 @@ interface SettingsPageProps {
 
 type ThanksLoadState = "idle" | "loading" | "loaded" | "error";
 
-type SettingsSectionId = "stream" | "game" | "audio" | "input" | "interface" | "thanks";
+type SettingsSectionId = "stream" | "game" | "audio" | "input" | "interface" | "about" | "thanks";
+type SettingsSearchScopeId =
+  | "stream-region"
+  | "stream-video"
+  | "stream-codec-diagnostics"
+  | "game"
+  | "audio"
+  | "input"
+  | "interface"
+  | "about"
+  | "thanks";
+
+const SETTINGS_SCOPE_SEARCH_TERMS: Record<SettingsSearchScopeId, readonly string[]> = {
+  "stream-region": ["stream", "region", "latency", "ping", "server", "route", "auto best"],
+  "stream-video": [
+    "stream",
+    "video",
+    "quality",
+    "codec",
+    "fps",
+    "resolution",
+    "bitrate",
+    "aspect ratio",
+    "l4s",
+    "cloud gsync",
+    "video acceleration",
+  ],
+  "stream-codec-diagnostics": [
+    "stream",
+    "codec diagnostics",
+    "diagnostics",
+    "decode",
+    "encode",
+    "gpu",
+    "cpu",
+    "test codecs",
+  ],
+  game: ["game", "language", "keyboard layout", "store", "launch"],
+  audio: ["audio", "microphone", "mic", "push to talk", "voice activity"],
+  input: [
+    "input",
+    "mouse",
+    "keyboard layout",
+    "shortcut",
+    "hotkey",
+    "keybind",
+    "controls",
+    "anti afk",
+    "pointer lock",
+    "recording",
+    "screenshot",
+  ],
+  interface: [
+    "interface",
+    "ui",
+    "overlay",
+    "controller mode",
+    "controller mode library",
+    "auto-load controller library",
+    "library",
+    "fullscreen",
+    "discord",
+    "rich presence",
+    "poster",
+    "session timer",
+    "counter",
+  ],
+  about: ["about", "update", "version", "logs", "cache", "download"],
+  thanks: ["thanks", "contributors", "supporters", "sponsors", "community"],
+};
 
 const POSTER_SIZE_MIN = 75;
 const POSTER_SIZE_MAX = 135;
@@ -115,6 +185,7 @@ const shortcutExamples = "Examples: F3, Ctrl+Shift+Q, Ctrl+Shift+K";
 const shortcutDefaults = {
   shortcutToggleStats: "F3",
   shortcutTogglePointerLock: "F8",
+  shortcutToggleFullscreen: "F10",
   shortcutStopStream: "Ctrl+Shift+Q",
   shortcutToggleAntiAfk: "Ctrl+Shift+K",
   shortcutToggleMicrophone: "Ctrl+Shift+M",
@@ -348,6 +419,51 @@ function loadCachedEntitledResolutions(): EntitledResolutionsCache | null {
   }
 }
 
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = value;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  const digits = size >= 100 || unitIndex === 0 ? 0 : size >= 10 ? 1 : 2;
+  return `${size.toFixed(digits)} ${units[unitIndex]}`;
+}
+
+function formatUpdaterTimestamp(value?: number): string | null {
+  if (!value) return null;
+  try {
+    return new Date(value).toLocaleString();
+  } catch {
+    return null;
+  }
+}
+
+function getUpdaterBadgeLabel(state: AppUpdaterState): string {
+  switch (state.status) {
+    case "disabled":
+      return "Packaged builds only";
+    case "idle":
+      return "Idle";
+    case "checking":
+      return "Checking";
+    case "available":
+      return "Update available";
+    case "not-available":
+      return "Up to date";
+    case "downloading":
+      return "Downloading";
+    case "downloaded":
+      return "Ready to install";
+    case "error":
+      return "Error";
+    default:
+      return "Idle";
+  }
+}
+
 function saveCachedEntitledResolutions(cache: EntitledResolutionsCache): void {
   try {
     window.sessionStorage.setItem(ENTITLED_RESOLUTIONS_STORAGE_KEY, JSON.stringify(cache));
@@ -442,6 +558,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
 
   const [toggleStatsInput, setToggleStatsInput] = useState(settings.shortcutToggleStats);
   const [togglePointerLockInput, setTogglePointerLockInput] = useState(settings.shortcutTogglePointerLock);
+  const [toggleFullscreenInput, setToggleFullscreenInput] = useState(settings.shortcutToggleFullscreen);
   const [stopStreamInput, setStopStreamInput] = useState(settings.shortcutStopStream);
   const [toggleAntiAfkInput, setToggleAntiAfkInput] = useState(settings.shortcutToggleAntiAfk);
   const [toggleMicrophoneInput, setToggleMicrophoneInput] = useState(settings.shortcutToggleMicrophone);
@@ -449,6 +566,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
   const [recordingInput, setRecordingInput] = useState(settings.shortcutToggleRecording);
   const [toggleStatsError, setToggleStatsError] = useState<string | null>(null);
   const [togglePointerLockError, setTogglePointerLockError] = useState<string | null>(null);
+  const [toggleFullscreenError, setToggleFullscreenError] = useState<string | null>(null);
   const [stopStreamError, setStopStreamError] = useState<string | null>(null);
   const [toggleAntiAfkError, setToggleAntiAfkError] = useState<string | null>(null);
   const [toggleMicrophoneError, setToggleMicrophoneError] = useState<string | null>(null);
@@ -466,6 +584,15 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
   const resolutionDropdownRef = useRef<HTMLDivElement | null>(null);
   const [settingsSearch, setSettingsSearch] = useState("");
   const [codecAdvancedOpen, setCodecAdvancedOpen] = useState(false);
+  const [updaterState, setUpdaterState] = useState<AppUpdaterState>({
+    status: "idle",
+    currentVersion: "0.0.0",
+    updateSource: "github-releases",
+    canCheck: false,
+    canDownload: false,
+    canInstall: false,
+    isPackaged: false,
+  });
 
   // Dynamic entitled resolutions from MES API
   const [entitledResolutions, setEntitledResolutions] = useState<EntitledResolution[]>([]);
@@ -478,6 +605,10 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
   useEffect(() => {
     setTogglePointerLockInput(settings.shortcutTogglePointerLock);
   }, [settings.shortcutTogglePointerLock]);
+
+  useEffect(() => {
+    setToggleFullscreenInput(settings.shortcutToggleFullscreen);
+  }, [settings.shortcutToggleFullscreen]);
 
   useEffect(() => {
     setStopStreamInput(settings.shortcutStopStream);
@@ -498,6 +629,29 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
   useEffect(() => {
     setRecordingInput(settings.shortcutToggleRecording);
   }, [settings.shortcutToggleRecording]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void window.openNow.getUpdaterState().then((state) => {
+      if (!cancelled) {
+        setUpdaterState(state);
+      }
+    }).catch((error) => {
+      console.warn("[Settings] Failed to load updater state:", error);
+    });
+
+    const unsubscribe = window.openNow.onUpdaterStateChanged((state) => {
+      if (!cancelled) {
+        setUpdaterState(state);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
 
   // Fetch subscription data (cached per account; reload only when account changes)
   useEffect(() => {
@@ -557,6 +711,15 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
     [entitledResolutions, settings.resolution, hasDynamic]
   );
   const posterSizePercent = Math.round(settings.posterSizeScale * 100);
+  const updaterLastCheckedLabel = useMemo(() => formatUpdaterTimestamp(updaterState.lastCheckedAt), [updaterState.lastCheckedAt]);
+  const updaterProgressPercent = updaterState.progress ? Math.max(0, Math.min(100, Math.round(updaterState.progress.percent))) : 0;
+  const updaterProgressLabel = updaterState.progress
+    ? `${formatBytes(updaterState.progress.transferred)} / ${formatBytes(updaterState.progress.total || updaterState.progress.transferred)}`
+    : null;
+  const updaterDownloadRateLabel = updaterState.progress?.bytesPerSecond
+    ? `${formatBytes(updaterState.progress.bytesPerSecond)}/s`
+    : null;
+  const updaterBadgeLabel = useMemo(() => getUpdaterBadgeLabel(updaterState), [updaterState]);
 
   const selectedResolutionLabel = useMemo(() => {
     if (hasDynamic) {
@@ -787,6 +950,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
       switch (key) {
         case "shortcutToggleStats": setToggleStatsError(msg); break;
         case "shortcutTogglePointerLock": setTogglePointerLockError(msg); break;
+        case "shortcutToggleFullscreen": setToggleFullscreenError(msg); break;
         case "shortcutStopStream": setStopStreamError(msg); break;
         case "shortcutToggleAntiAfk": setToggleAntiAfkError(msg); break;
         case "shortcutToggleMicrophone": setToggleMicrophoneError(msg); break;
@@ -802,6 +966,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
       switch (key) {
         case "shortcutToggleStats": setToggleStatsError(msg); break;
         case "shortcutTogglePointerLock": setTogglePointerLockError(msg); break;
+        case "shortcutToggleFullscreen": setToggleFullscreenError(msg); break;
         case "shortcutStopStream": setStopStreamError(msg); break;
         case "shortcutToggleAntiAfk": setToggleAntiAfkError(msg); break;
         case "shortcutToggleMicrophone": setToggleMicrophoneError(msg); break;
@@ -816,6 +981,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
       switch (key) {
         case "shortcutToggleStats": setToggleStatsError(conflict); break;
         case "shortcutTogglePointerLock": setTogglePointerLockError(conflict); break;
+        case "shortcutToggleFullscreen": setToggleFullscreenError(conflict); break;
         case "shortcutStopStream": setStopStreamError(conflict); break;
         case "shortcutToggleAntiAfk": setToggleAntiAfkError(conflict); break;
         case "shortcutToggleMicrophone": setToggleMicrophoneError(conflict); break;
@@ -828,6 +994,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
     switch (key) {
       case "shortcutToggleStats": setToggleStatsError(null); break;
       case "shortcutTogglePointerLock": setTogglePointerLockError(null); break;
+      case "shortcutToggleFullscreen": setToggleFullscreenError(null); break;
       case "shortcutStopStream": setStopStreamError(null); break;
       case "shortcutToggleAntiAfk": setToggleAntiAfkError(null); break;
       case "shortcutToggleMicrophone": setToggleMicrophoneError(null); break;
@@ -838,6 +1005,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
     switch (key) {
       case "shortcutToggleStats": setToggleStatsInput(normalized.canonical); break;
       case "shortcutTogglePointerLock": setTogglePointerLockInput(normalized.canonical); break;
+      case "shortcutToggleFullscreen": setToggleFullscreenInput(normalized.canonical); break;
       case "shortcutStopStream": setStopStreamInput(normalized.canonical); break;
       case "shortcutToggleAntiAfk": setToggleAntiAfkInput(normalized.canonical); break;
       case "shortcutToggleMicrophone": setToggleMicrophoneInput(normalized.canonical); break;
@@ -856,6 +1024,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
       switch (key) {
         case "shortcutToggleStats": setToggleStatsError(conflict); break;
         case "shortcutTogglePointerLock": setTogglePointerLockError(conflict); break;
+        case "shortcutToggleFullscreen": setToggleFullscreenError(conflict); break;
         case "shortcutStopStream": setStopStreamError(conflict); break;
         case "shortcutToggleAntiAfk": setToggleAntiAfkError(conflict); break;
         case "shortcutToggleMicrophone": setToggleMicrophoneError(conflict); break;
@@ -868,6 +1037,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
     switch (key) {
       case "shortcutToggleStats": setToggleStatsError(null); break;
       case "shortcutTogglePointerLock": setTogglePointerLockError(null); break;
+      case "shortcutToggleFullscreen": setToggleFullscreenError(null); break;
       case "shortcutStopStream": setStopStreamError(null); break;
       case "shortcutToggleAntiAfk": setToggleAntiAfkError(null); break;
       case "shortcutToggleMicrophone": setToggleMicrophoneError(null); break;
@@ -878,6 +1048,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
     switch (key) {
       case "shortcutToggleStats": setToggleStatsInput(canonical); break;
       case "shortcutTogglePointerLock": setTogglePointerLockInput(canonical); break;
+      case "shortcutToggleFullscreen": setToggleFullscreenInput(canonical); break;
       case "shortcutStopStream": setStopStreamInput(canonical); break;
       case "shortcutToggleAntiAfk": setToggleAntiAfkInput(canonical); break;
       case "shortcutToggleMicrophone": setToggleMicrophoneInput(canonical); break;
@@ -922,6 +1093,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
       switch (key) {
         case "shortcutToggleStats": setToggleStatsError(msg); break;
         case "shortcutTogglePointerLock": setTogglePointerLockError(msg); break;
+        case "shortcutToggleFullscreen": setToggleFullscreenError(msg); break;
         case "shortcutStopStream": setStopStreamError(msg); break;
         case "shortcutToggleAntiAfk": setToggleAntiAfkError(msg); break;
         case "shortcutToggleMicrophone": setToggleMicrophoneError(msg); break;
@@ -937,6 +1109,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
     () =>
       settings.shortcutToggleStats === shortcutDefaults.shortcutToggleStats
       && settings.shortcutTogglePointerLock === shortcutDefaults.shortcutTogglePointerLock
+      && settings.shortcutToggleFullscreen === shortcutDefaults.shortcutToggleFullscreen
       && settings.shortcutStopStream === shortcutDefaults.shortcutStopStream
       && settings.shortcutToggleAntiAfk === shortcutDefaults.shortcutToggleAntiAfk
       && settings.shortcutToggleMicrophone === shortcutDefaults.shortcutToggleMicrophone
@@ -945,6 +1118,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
     [
       settings.shortcutToggleStats,
       settings.shortcutTogglePointerLock,
+      settings.shortcutToggleFullscreen,
       settings.shortcutStopStream,
       settings.shortcutToggleAntiAfk,
       settings.shortcutToggleMicrophone,
@@ -956,6 +1130,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
   const handleResetShortcuts = useCallback(() => {
     setToggleStatsInput(shortcutDefaults.shortcutToggleStats);
     setTogglePointerLockInput(shortcutDefaults.shortcutTogglePointerLock);
+    setToggleFullscreenInput(shortcutDefaults.shortcutToggleFullscreen);
     setStopStreamInput(shortcutDefaults.shortcutStopStream);
     setToggleAntiAfkInput(shortcutDefaults.shortcutToggleAntiAfk);
     setToggleMicrophoneInput(shortcutDefaults.shortcutToggleMicrophone);
@@ -963,6 +1138,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
     setRecordingInput(shortcutDefaults.shortcutToggleRecording);
     setToggleStatsError(null);
     setTogglePointerLockError(null);
+    setToggleFullscreenError(null);
     setStopStreamError(null);
     setToggleAntiAfkError(null);
     setToggleMicrophoneError(null);
@@ -986,7 +1162,28 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
   }, []);
 
   useEffect(() => {
-    if (activeSection !== "thanks") {
+    const normalizedSearch = settingsSearch.trim().toLowerCase();
+    const showAll = normalizedSearch.length > 0;
+    const shouldShowThanks = activeSection === "thanks" || (showAll && (() => {
+      const terms = SETTINGS_SCOPE_SEARCH_TERMS["thanks"];
+      const searchTokens = normalizedSearch.split(/[^a-z0-9]+/).filter((token) => token.length > 0);
+      if (searchTokens.length === 0) {
+        return true;
+      }
+      const searchableWords = Array.from(
+        new Set(
+          terms
+            .join(" ")
+            .toLowerCase()
+            .split(/[^a-z0-9]+/)
+            .filter((word) => word.length > 0),
+        ),
+      );
+      const tokenMatchesWord = (token: string, word: string): boolean => token === word || word.startsWith(token);
+      return searchTokens.every((token) => searchableWords.some((word) => tokenMatchesWord(token, word)));
+    })());
+
+    if (!shouldShowThanks) {
       thanksRequestIdRef.current += 1;
       setThanksLoadState((current) => (current === "loading" || current === "error" ? "idle" : current));
       setThanksFetchError(null);
@@ -1034,7 +1231,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
         setThanksLoadState("error");
       },
     );
-  }, [activeSection, thanksData, thanksLoadState]);
+  }, [activeSection, thanksData, thanksLoadState, settingsSearch]);
 
   const renderPersonLink = useCallback((person: ThankYouContributor | ThankYouSupporter, content: JSX.Element) => {
     if (!person.profileUrl) {
@@ -1190,12 +1387,42 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
     </div>
   );
 
-  const showAll = settingsSearch.length > 0;
-  const showStream = activeSection === "stream" || showAll;
-  const showGame = activeSection === "game" || showAll;
-  const showAudio = activeSection === "audio" || showAll;
-  const showInput = activeSection === "input" || showAll;
-  const showInterface = activeSection === "interface" || showAll;
+  const normalizedSettingsSearch = settingsSearch.trim().toLowerCase();
+  const showAll = normalizedSettingsSearch.length > 0;
+  const tokenMatchesWord = (token: string, word: string): boolean => token === word || word.startsWith(token);
+  const scopeMatchesSearch = (scopeId: SettingsSearchScopeId): boolean => {
+    if (!showAll) {
+      return true;
+    }
+    const terms = SETTINGS_SCOPE_SEARCH_TERMS[scopeId];
+    const searchTokens = normalizedSettingsSearch.split(/[^a-z0-9]+/).filter((token) => token.length > 0);
+    if (searchTokens.length === 0) {
+      return true;
+    }
+    const searchableWords = Array.from(
+      new Set(
+        terms
+          .join(" ")
+          .toLowerCase()
+          .split(/[^a-z0-9]+/)
+          .filter((word) => word.length > 0),
+      ),
+    );
+    return searchTokens.every((token) => searchableWords.some((word) => tokenMatchesWord(token, word)));
+  };
+
+  const showStreamRegion = showAll ? scopeMatchesSearch("stream-region") : activeSection === "stream";
+  const showStreamVideo = showAll ? scopeMatchesSearch("stream-video") : activeSection === "stream";
+  const showStreamCodecDiagnostics = showAll ? scopeMatchesSearch("stream-codec-diagnostics") : activeSection === "stream";
+  const showStream = showStreamRegion || showStreamVideo || showStreamCodecDiagnostics;
+  const showGame = showAll ? scopeMatchesSearch("game") : activeSection === "game";
+  const showAudio = showAll ? scopeMatchesSearch("audio") : activeSection === "audio";
+  const showInput = showAll ? scopeMatchesSearch("input") : activeSection === "input";
+  const showInterface = showAll ? scopeMatchesSearch("interface") : activeSection === "interface";
+  const showAbout = showAll ? scopeMatchesSearch("about") : activeSection === "about";
+  const showThanks = showAll ? scopeMatchesSearch("thanks") : activeSection === "thanks";
+  const hasAnySearchMatches = showStream || showGame || showAudio || showInput || showInterface || showAbout || showThanks;
+  const shouldRenderSettingsSections = showAll || activeSection !== "thanks";
 
   return (
     <div className="settings-page">
@@ -1233,12 +1460,13 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
             { id: "audio" as SettingsSectionId, label: "Audio", icon: <Mic size={15} /> },
             { id: "input" as SettingsSectionId, label: "Input", icon: <Keyboard size={15} /> },
             { id: "interface" as SettingsSectionId, label: "Interface", icon: <Monitor size={15} /> },
+            { id: "about" as SettingsSectionId, label: "About", icon: <Info size={15} /> },
             { id: "thanks" as SettingsSectionId, label: "Thanks", icon: <Heart size={15} /> },
           ]).map(item => (
             <button
               key={item.id}
               type="button"
-              className={`settings-nav-item ${activeSection === item.id ? "active" : ""}`}
+              className={`settings-nav-item ${!showAll && activeSection === item.id ? "active" : ""}`}
               onClick={() => { setActiveSection(item.id); setSettingsSearch(""); }}
             >
               {item.icon}
@@ -1250,14 +1478,22 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
 
       {/* ── Content ───────────────────────────────────────── */}
       <div className="settings-content">
-        {activeSection === "thanks" ? (
-          thanksTabContent
+        {showAll && !hasAnySearchMatches ? (
+          <section className="settings-section">
+            <div className="settings-thanks-state settings-thanks-state--muted">
+              <span>No settings matched "{settingsSearch.trim()}".</span>
+            </div>
+          </section>
         ) : (
           <>
+            {showThanks && thanksTabContent}
+            {shouldRenderSettingsSections && (
+              <>
             {/* ═══ STREAM ════════════════════════════════════ */}
             {showStream && (
               <>
                 {/* ── Region ── */}
+                {showStreamRegion && (
                 <section className="settings-section">
                   {showAll && <div className="settings-section-context">Stream</div>}
                   <div className="settings-section-header">
@@ -1422,7 +1658,8 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
               </div>
             </section>
 
-            {/* ── Video ── */}
+                )}
+            {showStreamVideo && (
             <section className="settings-section">
               {showAll && <div className="settings-section-context">Stream</div>}
               <div className="settings-section-header">
@@ -1643,7 +1880,8 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
               </div>
             </section>
 
-            {/* ── Codec Diagnostics (advanced disclosure) ── */}
+            )}
+            {showStreamCodecDiagnostics && (
             <div className="settings-advanced-wrap">
               <button
                 type="button"
@@ -1730,6 +1968,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
                 </section>
               )}
             </div>
+            )}
           </>
         )}
 
@@ -2079,6 +2318,25 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
                 </div>
 
                 <div className="settings-shortcut-row">
+                  <span className="settings-shortcut-label" id="shortcut-fullscreen-label">Toggle Full Screen</span>
+                  <input
+                    type="text"
+                    id="shortcut-fullscreen"
+                    aria-labelledby="shortcut-fullscreen-label"
+                    readOnly
+                    className={`settings-text-input settings-shortcut-input ${toggleFullscreenError ? "error" : ""}`}
+                    value={toggleFullscreenInput}
+                    onFocus={(e) => e.target.select()}
+                    onBlur={() => handleShortcutBlur("shortcutToggleFullscreen", toggleFullscreenInput)}
+                    onPaste={(e) => handleShortcutPaste("shortcutToggleFullscreen", e)}
+                    onKeyDown={(e) => handleShortcutCaptureKeyDown("shortcutToggleFullscreen", e)}
+                    placeholder="Click here, then press a key"
+                    title="Focus and press the key combination to bind"
+                    spellCheck={false}
+                  />
+                </div>
+
+                <div className="settings-shortcut-row">
                   <span className="settings-shortcut-label" id="shortcut-stop-stream-label">Stop Stream</span>
                   <input
                     type="text"
@@ -2187,10 +2445,11 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
                 </div>
               </div>
 
-              {(toggleStatsError || togglePointerLockError || stopStreamError || toggleAntiAfkError || toggleMicrophoneError || screenshotError || recordingError) && (
+              {(toggleStatsError || togglePointerLockError || toggleFullscreenError || stopStreamError || toggleAntiAfkError || toggleMicrophoneError || screenshotError || recordingError) && (
                 <span className="settings-input-hint">
                   {toggleStatsError
                     || togglePointerLockError
+                    || toggleFullscreenError
                     || stopStreamError
                     || toggleAntiAfkError
                     || toggleMicrophoneError
@@ -2199,9 +2458,9 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
                 </span>
               )}
 
-              {!toggleStatsError && !togglePointerLockError && !stopStreamError && !toggleAntiAfkError && !toggleMicrophoneError && !screenshotError && !recordingError && (
+              {!toggleStatsError && !togglePointerLockError && !toggleFullscreenError && !stopStreamError && !toggleAntiAfkError && !toggleMicrophoneError && !screenshotError && !recordingError && (
                 <span className="settings-shortcut-hint">
-                  Click a field and press the keys to bind, or paste a shortcut ({shortcutExamples}). Escape cancels focus. Stop: {formatShortcutForDisplay(settings.shortcutStopStream, isMac)}. Mic: {formatShortcutForDisplay(settings.shortcutToggleMicrophone, isMac)}. Screenshot: {formatShortcutForDisplay(settings.shortcutScreenshot, isMac)}. Recording: {formatShortcutForDisplay(settings.shortcutToggleRecording, isMac)}.
+                  Click a field and press the keys to bind, or paste a shortcut ({shortcutExamples}). Escape cancels focus. Full screen: {formatShortcutForDisplay(settings.shortcutToggleFullscreen, isMac)}. Stop: {formatShortcutForDisplay(settings.shortcutStopStream, isMac)}. Mic: {formatShortcutForDisplay(settings.shortcutToggleMicrophone, isMac)}. Screenshot: {formatShortcutForDisplay(settings.shortcutScreenshot, isMac)}. Recording: {formatShortcutForDisplay(settings.shortcutToggleRecording, isMac)}.
                 </span>
               )}
                 </div>
@@ -2253,8 +2512,38 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
 
                   <div className="settings-row">
                     <label className="settings-label">
+                      Hide Server Selector
+                      <span className="settings-hint">Skip the free-tier server selection dialog and always launch with OpenNOW's default routing.</span>
+                    </label>
+                    <label className="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settings.hideServerSelector}
+                        onChange={(e) => handleChange("hideServerSelector", e.target.checked)}
+                      />
+                      <span className="settings-toggle-track" />
+                    </label>
+                  </div>
+
+                  <div className="settings-row">
+                    <label className="settings-label">
+                      Show Anti-AFK Indicator
+                      <span className="settings-hint">Show the ANTI-AFK ON badge while Anti-AFK is enabled during streaming.</span>
+                    </label>
+                    <label className="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settings.showAntiAfkIndicator}
+                        onChange={(e) => handleChange("showAntiAfkIndicator", e.target.checked)}
+                      />
+                      <span className="settings-toggle-track" />
+                    </label>
+                  </div>
+
+                  <div className="settings-row">
+                    <label className="settings-label">
                       Auto Full Screen
-                      <span className="settings-hint">Automatically enter fullscreen when a stream starts or pointer lock is requested.</span>
+                      <span className="settings-hint">Automatically enter fullscreen when connecting to or starting a session.</span>
                     </label>
                     <label className="settings-toggle">
                       <input
@@ -2451,73 +2740,183 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
               </div>
             </section>
 
-            {/* ── Miscellaneous ── */}
-            <section className="settings-section">
-              {showAll && <div className="settings-section-context">Interface</div>}
-              <div className="settings-section-header">
-                <h2>Miscellaneous</h2>
-              </div>
-              <div className="settings-rows">
-                <div className="settings-row">
-                  <label className="settings-label">
-                    Export Logs
-                    <span className="settings-hint">Download debug logs with sensitive data redacted for privacy</span>
-                  </label>
+          </>
+        )}
+
+        {showAbout && (
+          <section className="settings-section">
+            {showAll && <div className="settings-section-context">About</div>}
+            <div className="settings-section-header">
+              <h2>About</h2>
+            </div>
+            <div className="settings-rows">
+              <div className="settings-row">
+                <label className="settings-label settings-label--wrap">
+                  <span className="settings-label-title">
+                    Application Updates
+                    <span className={`settings-inline-badge settings-inline-badge--updater settings-inline-badge--updater-${updaterState.status}`}>
+                      {updaterBadgeLabel}
+                    </span>
+                  </span>
+                  <span className="settings-hint">
+                    Version {updaterState.currentVersion} · {settings.autoCheckForUpdates
+                      ? "Packaged builds check GitHub Releases in the background."
+                      : "Background update checks are off until you manually check."}
+                  </span>
+                  {updaterState.message ? (
+                    <span className="settings-hint settings-hint--updater-message">{updaterState.message}</span>
+                  ) : null}
+                  {updaterLastCheckedLabel ? (
+                    <span className="settings-hint">Last checked: {updaterLastCheckedLabel}</span>
+                  ) : null}
+                  {updaterState.availableVersion && updaterState.status !== "downloaded" ? (
+                    <span className="settings-hint">Available version: {updaterState.availableVersion}</span>
+                  ) : null}
+                  {updaterState.downloadedVersion ? (
+                    <span className="settings-hint">Downloaded version: {updaterState.downloadedVersion}</span>
+                  ) : null}
+                  {updaterState.status === "downloading" && updaterState.progress ? (
+                    <span className="settings-hint">
+                      Download progress: {updaterProgressPercent}%{updaterProgressLabel ? ` · ${updaterProgressLabel}` : ""}{updaterDownloadRateLabel ? ` · ${updaterDownloadRateLabel}` : ""}
+                    </span>
+                  ) : null}
+                </label>
+                <div className="settings-updater-actions">
                   <button
                     type="button"
                     className="settings-export-logs-btn"
-                    onClick={async () => {
-                      try {
-                        const logs = await window.openNow.exportLogs("text");
-                        const blob = new Blob([logs], { type: "text/plain" });
-                        const url = URL.createObjectURL(blob);
-                        const a = document.createElement("a");
-                        a.href = url;
-                        a.download = `opennow-logs-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`;
-                        document.body.appendChild(a);
-                        a.click();
-                        document.body.removeChild(a);
-                        URL.revokeObjectURL(url);
-                      } catch (err) {
-                        console.error("[Settings] Failed to export logs:", err);
-                        alert("Failed to export logs. Please try again.");
-                      }
+                    disabled={!updaterState.canCheck}
+                    onClick={() => {
+                      void window.openNow.checkForUpdates().catch((error) => {
+                        console.error("[Settings] Failed to trigger update check:", error);
+                      });
                     }}
                   >
-                    <FileDown size={16} />
-                    Export Logs
+                    {updaterState.status === "checking" ? <Loader size={16} className="spin" /> : <RefreshCcw size={16} />}
+                    Check for Updates
                   </button>
-                </div>
-
-                <div className="settings-row">
-                  <label className="settings-label">
-                    Delete Cache
-                    <span className="settings-hint">Clear all cached game data, images, and metadata</span>
-                  </label>
-                  <button
-                    type="button"
-                    className="settings-delete-cache-btn"
-                    onClick={async () => {
-                      if (!window.confirm("Are you sure you want to delete all cached data? This will clear all game metadata, images, and library information.")) {
-                        return;
-                      }
-                      try {
-                        await window.openNow.deleteCache();
-                        alert("Cache cleared successfully. The app will refresh on next startup.");
-                      } catch (err) {
-                        console.error("[Settings] Failed to delete cache:", err);
-                        alert("Failed to delete cache. Please try again.");
-                      }
-                    }}
-                  >
-                    <Trash2 size={16} />
-                    Delete Cache
-                  </button>
+                  {updaterState.status === "available" ? (
+                    <button
+                      type="button"
+                      className="settings-export-logs-btn"
+                      disabled={!updaterState.canDownload}
+                      onClick={() => {
+                        void window.openNow.downloadUpdate().catch((error) => {
+                          console.error("[Settings] Failed to download update:", error);
+                        });
+                      }}
+                    >
+                      <Download size={16} />
+                      Download Update
+                    </button>
+                  ) : null}
+                  {updaterState.status === "downloaded" ? (
+                    <button
+                      type="button"
+                      className="settings-save-btn settings-save-btn--compact"
+                      disabled={!updaterState.canInstall}
+                      onClick={() => {
+                        void window.openNow.installUpdateAndRestart().catch((error) => {
+                          console.error("[Settings] Failed to install update:", error);
+                        });
+                      }}
+                    >
+                      <RefreshCcw size={16} />
+                      Restart to Install
+                    </button>
+                  ) : null}
                 </div>
               </div>
-            </section>
-          </>
-        )}
+
+              <div className="settings-row">
+                <label className="settings-label settings-label--wrap">
+                  Automatically Check for Updates
+                  <span className="settings-hint">
+                    When on, packaged builds check GitHub Releases in the background after startup and periodically while OpenNOW is running.
+                  </span>
+                  <span className="settings-hint">
+                    When off, OpenNOW stays on the current version unless you use the manual update buttons below.
+                  </span>
+                </label>
+                <label className="settings-toggle">
+                  <input
+                    type="checkbox"
+                    checked={settings.autoCheckForUpdates}
+                    onChange={(e) => handleChange("autoCheckForUpdates", e.target.checked)}
+                  />
+                  <span className="settings-toggle-track" />
+                </label>
+              </div>
+
+              {updaterState.status === "downloading" && updaterState.progress ? (
+                <div className="settings-row settings-row--column">
+                  <div className="settings-updater-progress">
+                    <div className="settings-updater-progress-bar" style={{ width: `${updaterProgressPercent}%` }} />
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="settings-row">
+                <label className="settings-label">
+                  Export Logs
+                  <span className="settings-hint">Download debug logs with sensitive data redacted for privacy</span>
+                </label>
+                <button
+                  type="button"
+                  className="settings-export-logs-btn"
+                  onClick={async () => {
+                    try {
+                      const logs = await window.openNow.exportLogs("text");
+                      const blob = new Blob([logs], { type: "text/plain" });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.download = `opennow-logs-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`;
+                      document.body.appendChild(a);
+                      a.click();
+                      document.body.removeChild(a);
+                      URL.revokeObjectURL(url);
+                    } catch (err) {
+                      console.error("[Settings] Failed to export logs:", err);
+                      alert("Failed to export logs. Please try again.");
+                    }
+                  }}
+                >
+                  <FileDown size={16} />
+                  Export Logs
+                </button>
+              </div>
+
+              <div className="settings-row">
+                <label className="settings-label">
+                  Delete Cache
+                  <span className="settings-hint">Clear all cached game data, images, and metadata</span>
+                </label>
+                <button
+                  type="button"
+                  className="settings-delete-cache-btn"
+                  onClick={async () => {
+                    if (!window.confirm("Are you sure you want to delete all cached data? This will clear all game metadata, images, and library information.")) {
+                      return;
+                    }
+                    try {
+                      await window.openNow.deleteCache();
+                      alert("Cache cleared successfully. The app will refresh on next startup.");
+                    } catch (err) {
+                      console.error("[Settings] Failed to delete cache:", err);
+                      alert("Failed to delete cache. Please try again.");
+                    }
+                  }}
+                >
+                  <Trash2 size={16} />
+                  Delete Cache
+                </button>
+              </div>
+            </div>
+          </section>
+                )}
+              </>
+            )}
           </>
         )}
       </div>
