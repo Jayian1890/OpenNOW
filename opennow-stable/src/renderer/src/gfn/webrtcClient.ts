@@ -2931,7 +2931,16 @@ export class GfnWebRtcClient {
           this.pointerLockRelockTimer = null;
         }
         this.suppressNextSyntheticEscape = false;
-        this.requestEscapeKeyboardLock();
+        // Try to acquire keyboard lock for low-level key capture (best-effort).
+        try {
+          this.requestEscapeKeyboardLock();
+        } catch {}
+
+        // Notify main process that pointer lock is active so native-level
+        // interception (before-input-event) can act accordingly.
+        try {
+          (window as any).openNow?.notifyPointerLockChange?.(true);
+        } catch {}
         return;
       }
 
@@ -2939,6 +2948,10 @@ export class GfnWebRtcClient {
       // current cursor position rather than from a stale last-known position.
       lastAbsX = null;
       lastAbsY = null;
+
+      try {
+        (window as any).openNow?.notifyPointerLockChange?.(false);
+      } catch {}
 
       // Pointer lock was lost
       if (!this.inputReady) return;
@@ -3158,6 +3171,31 @@ export class GfnWebRtcClient {
     window.addEventListener("blur", onWindowBlur);
     document.addEventListener("visibilitychange", onVisibilityChange);
     window.addEventListener("focus", onWindowFocus);
+
+    // Listen for external Escape events forwarded from main process and
+    // forward them to the remote session as synthetic Escape keypresses.
+    try {
+      (window as any).openNow?.onExternalEscape?.(() => {
+        if (!this.inputReady) return;
+        this.releasePressedKeys("external Escape forwarded from main");
+
+        const escDown = this.inputEncoder.encodeKeyDown({
+          keycode: 0x1B,
+          scancode: codeMap.Escape.scancode,
+          modifiers: 0,
+          timestampUs: timestampUs(),
+        });
+        this.sendReliable(escDown);
+
+        const escUp = this.inputEncoder.encodeKeyUp({
+          keycode: 0x1B,
+          scancode: codeMap.Escape.scancode,
+          modifiers: 0,
+          timestampUs: timestampUs(),
+        });
+        this.sendReliable(escUp);
+      });
+    } catch {}
 
     this.inputCleanup.push(() => window.removeEventListener("gamepadconnected", this.onGamepadConnected));
     this.inputCleanup.push(() => window.removeEventListener("gamepaddisconnected", this.onGamepadDisconnected));

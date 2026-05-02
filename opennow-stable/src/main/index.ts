@@ -236,6 +236,9 @@ let isShutdownCleanupComplete = false;
 let isUpdaterInstallQuitInProgress = false;
 let explicitShutdownFallbackTimer: NodeJS.Timeout | null = null;
 
+// Runtime pointer-lock state (updated by renderer)
+let isPointerLockActiveRuntime = false;
+
 function clearExplicitShutdownFallback(): void {
   if (explicitShutdownFallbackTimer) {
     clearTimeout(explicitShutdownFallbackTimer);
@@ -728,6 +731,34 @@ async function createMainWindow(): Promise<void> {
       }
     });
   }
+
+  // Track pointer-lock state from renderer; used to decide whether to swallow
+  // Escape at the native level (before Chromium handles it).
+  ipcMain.on(IPC_CHANNELS.POINTER_LOCK_CHANGE, (_ev, active: boolean) => {
+    isPointerLockActiveRuntime = Boolean(active);
+  });
+
+  // Intercept Escape early to avoid Chromium exiting fullscreen before the
+  // renderer can forward the key to the remote session. This is a best-effort
+  // interception and is gated by the user's `allowEscapeToExitFullscreen` setting.
+  mainWindow.webContents.on("before-input-event", (event, input) => {
+    try {
+      if (
+        input.type === "keyDown" &&
+        input.key === "Escape" &&
+        isPointerLockActiveRuntime &&
+        settingsManager &&
+        !settingsManager.get("allowEscapeToExitFullscreen")
+      ) {
+        event.preventDefault();
+        if (mainWindow && mainWindow.webContents) {
+          mainWindow.webContents.send(IPC_CHANNELS.EXTERNAL_ESCAPE);
+        }
+      }
+    } catch (err) {
+      // ignore errors - interception is best-effort
+    }
+  });
 
   if (process.env.ELECTRON_RENDERER_URL) {
     await mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
