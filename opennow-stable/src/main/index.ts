@@ -68,6 +68,7 @@ import type {
   ThankYouSupporter,
 } from "@shared/gfn";
 import { serializeSessionErrorTransport } from "@shared/sessionError";
+import { enrichErrorForIpc, formatErrorChainForLog } from "@shared/networkError";
 
 import { getSettingsManager, type SettingsManager } from "./settings";
 
@@ -783,7 +784,7 @@ function rethrowSerializedSessionError(error: unknown): never {
   if (error instanceof SessionError) {
     throw new Error(serializeSessionErrorTransport(error.toJSON()));
   }
-  throw error;
+  throw enrichErrorForIpc(error);
 }
 
 const AUTO_RESUME_SESSION_STATUSES = new Set([2, 3]);
@@ -1229,8 +1230,7 @@ function registerIpcHandlers(): void {
             });
           } catch (hydrateError) {
             console.warn(
-              `[CreateSession] Failed to hydrate launching session ${launchingCandidate.sessionId}; falling back to minimal handoff:`,
-              hydrateError,
+              `[CreateSession] Failed to hydrate launching session ${launchingCandidate.sessionId}; falling back to minimal handoff: ${formatErrorChainForLog(hydrateError)}`,
             );
             return {
               sessionId: launchingCandidate.sessionId,
@@ -1247,7 +1247,7 @@ function registerIpcHandlers(): void {
 
         return null;
       } catch (claimError) {
-        console.warn("[CreateSession] Failed to claim existing session:", claimError);
+        console.warn(`[CreateSession] Failed to claim existing session: ${formatErrorChainForLog(claimError)}`);
         return null;
       }
     };
